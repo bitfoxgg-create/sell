@@ -6,6 +6,7 @@ from flask import Flask
 
 import asyncpg
 from aiogram import Bot, Dispatcher, F
+from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.enums import ParseMode
 from aiogram.filters import Command, CommandStart, StateFilter
 from aiogram.fsm.context import FSMContext
@@ -39,7 +40,9 @@ BOT_STATUS = True
 MUST_JOIN_CHANNEL = None
 BANNED_USERS_CACHE = set()
 
-bot = Bot(token=BOT_TOKEN)
+# High-Performance Bot Session Initializer
+session = AiohttpSession()
+bot = Bot(token=BOT_TOKEN, session=session)
 dp = Dispatcher(storage=MemoryStorage())
 db_pool = None
 
@@ -100,7 +103,7 @@ class AdminState(StatesGroup):
     waiting_for_edit_method_qr = State()
 
 # ============================================
-# DATABASE INITIALIZATION & CACHE
+# DATABASE INITIALIZATION & CACHE OPTIMIZATIONS
 # ============================================
 
 async def init_db():
@@ -112,12 +115,15 @@ async def init_db():
     if url.startswith("postgres://"):
         url = url.replace("postgres://", "postgresql://", 1)
         
+    # High-Performance Pool Settings
     db_pool = await asyncpg.create_pool(
         dsn=url, 
         ssl='require', 
-        min_size=3, 
-        max_size=15,
-        statement_cache_size=0
+        min_size=5, 
+        max_size=20,
+        timeout=10.0,
+        command_timeout=10.0,
+        statement_cache_size=100
     )
     
     async with db_pool.acquire() as conn:
@@ -148,7 +154,7 @@ async def init_db():
         await conn.execute("ALTER TABLE deposit_methods ADD COLUMN IF NOT EXISTS custom_emoji_id TEXT DEFAULT NULL")
         await conn.execute("ALTER TABLE deposit_methods ADD COLUMN IF NOT EXISTS qr_file_id TEXT DEFAULT NULL")
 
-        # Populate or update default deposit methods with correct custom emoji IDs
+        # Populate or update default deposit methods
         await conn.execute('''
             INSERT INTO deposit_methods (name, details, custom_emoji_id) VALUES
             ('Binance ID', '1230141397', '5278467510604160626'),
@@ -219,6 +225,12 @@ async def init_db():
                 value TEXT
             )
         ''')
+
+        # High-Speed SQL Indexes
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_inventory_status ON inventory(account_type, status)")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_orders_user_id ON orders(user_id)")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_transactions_user_id ON transactions(user_id)")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_deposits_status ON deposits(status)")
 
 async def load_settings_and_cache():
     global BANNED_USERS_CACHE, MUST_JOIN_CHANNEL, BOT_STATUS, PRICE_NEW_GMAIL, PRICE_OLD_GMAIL, WARRANTY_DAYS
@@ -1505,7 +1517,7 @@ async def return_to_main_menu(message: Message, state: FSMContext):
     await message.answer("🏠 Returned to User Main Menu.", reply_markup=get_main_menu_keyboard())
 
 # ============================================
-# RUNNER
+# HIGH-PERFORMANCE POLLING RUNNER
 # ============================================
 
 async def main():
@@ -1516,8 +1528,13 @@ async def main():
     server_thread.daemon = True
     server_thread.start()
     
-    print("🤖 Gmail Store Bot & Admin Control Panel running 24/7 on Render...")
-    await dp.start_polling(bot)
+    print("🤖 Gmail Store Bot running optimized 24/7 on Render...")
+    # Skip pending updates and restrict listeners for faster response processing
+    await dp.start_polling(
+        bot,
+        allowed_updates=["message", "callback_query"],
+        drop_pending_updates=True
+    )
 
 if __name__ == '__main__':
     asyncio.run(main())
