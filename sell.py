@@ -758,7 +758,7 @@ async def cb_noop(call: CallbackQuery):
     await call.answer()
 
 # ============================================
-# DYNAMIC USER DEPOSIT SYSTEM (SMOOTH TRANSITIONS)
+# DYNAMIC USER DEPOSIT SYSTEM
 # ============================================
 
 @dp.callback_query(F.data == "menu_deposit")
@@ -903,9 +903,9 @@ async def cb_admin_approve_deposit(call: CallbackQuery):
             
             # Upsert ensures user record exists and balance is properly credited
             await conn.execute('''
-                INSERT INTO users (user_id, balance)
+                INSERT INTO users (user_id, balance) 
                 VALUES ($1, $2)
-                ON CONFLICT (user_id)
+                ON CONFLICT (user_id) 
                 DO UPDATE SET balance = users.balance + EXCLUDED.balance
             ''', user_id, amount)
             
@@ -1307,27 +1307,24 @@ async def process_admin_unban_user(message: Message, state: FSMContext):
         await message.answer(f'<tg-emoji emoji-id="5274099962655816924">❌</tg-emoji> Error: {e}', reply_markup=get_admin_menu_keyboard())
     await state.clear()
 
-# --- DYNAMIC BROADCAST SYSTEM WITH ACTION BUTTON CHOICES ---
+# ============================================
+# FIXED BROADCAST (100% PRESERVES FORMATTING & PREMIUM EMOJIS)
+# ============================================
+
 @dp.message(F.text == "📢 Broadcast", StateFilter("*"))
 async def admin_broadcast_prompt(message: Message, state: FSMContext):
     if message.from_user.id != ADMIN_ID:
         return
     await state.set_state(AdminState.waiting_for_broadcast)
-    await message.answer('<tg-emoji emoji-id="5206607081334906820">📢</tg-emoji> <b>Step 1/2:</b> Send or forward the broadcast message (Text or Photo):', parse_mode=ParseMode.HTML)
+    await message.answer('<tg-emoji emoji-id="5206607081334906820">📢</tg-emoji> <b>Step 1/2:</b> Send or forward the broadcast message:', parse_mode=ParseMode.HTML)
 
 @dp.message(AdminState.waiting_for_broadcast, ~F.text.in_(MENU_BUTTONS))
 async def process_broadcast_message_received(message: Message, state: FSMContext):
-    if message.photo:
-        await state.update_data(
-            broadcast_type="photo",
-            broadcast_photo=message.photo[-1].file_id,
-            broadcast_caption=message.caption or ""
-        )
-    else:
-        await state.update_data(
-            broadcast_type="text",
-            broadcast_text=message.text
-        )
+    # Store exact message ID and Chat ID to preserve all entities & emojis
+    await state.update_data(
+        broadcast_chat_id=message.chat.id,
+        broadcast_message_id=message.message_id
+    )
 
     await state.set_state(AdminState.waiting_for_broadcast_button)
 
@@ -1339,7 +1336,7 @@ async def process_broadcast_message_received(message: Message, state: FSMContext
 
     await message.answer(
         "🔘 <b>Step 2/2: Choose an Action Button to attach:</b>\n\n"
-        "Users can tap this button directly from the broadcast to jump straight into the feature.",
+        "Users can tap this button directly on the broadcast message to open the selected feature.",
         parse_mode=ParseMode.HTML,
         reply_markup=kb.as_markup()
     )
@@ -1350,7 +1347,9 @@ async def process_broadcast_execution(call: CallbackQuery, state: FSMContext):
     choice = call.data.split(":")[1]
     data = await state.get_data()
 
-    # Build target user inline button
+    from_chat_id = data.get("broadcast_chat_id")
+    msg_id = data.get("broadcast_message_id")
+
     user_markup = None
     if choice == "deposit":
         kb = InlineKeyboardBuilder()
@@ -1375,21 +1374,13 @@ async def process_broadcast_execution(call: CallbackQuery, state: FSMContext):
     for u in users:
         target_uid = u['user_id']
         try:
-            if data.get("broadcast_type") == "photo":
-                await bot.send_photo(
-                    chat_id=target_uid,
-                    photo=data.get("broadcast_photo"),
-                    caption=data.get("broadcast_caption"),
-                    reply_markup=user_markup,
-                    parse_mode=ParseMode.HTML
-                )
-            else:
-                await bot.send_message(
-                    chat_id=target_uid,
-                    text=data.get("broadcast_text"),
-                    reply_markup=user_markup,
-                    parse_mode=ParseMode.HTML
-                )
+            # copy_message replicates the exact text, entities, tags, and custom emojis
+            await bot.copy_message(
+                chat_id=target_uid,
+                from_chat_id=from_chat_id,
+                message_id=msg_id,
+                reply_markup=user_markup
+            )
             sent += 1
         except Exception:
             failed += 1
