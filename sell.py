@@ -91,8 +91,11 @@ class AdminState(StatesGroup):
     waiting_for_warranty_days = State()
     # Dynamic Deposit Management States
     waiting_for_new_method_name = State()
+    waiting_for_new_method_emoji = State()
     waiting_for_new_method_details = State()
     waiting_for_new_method_qr = State()
+    waiting_for_edit_method_name = State()
+    waiting_for_edit_method_emoji = State()
     waiting_for_edit_method_details = State()
     waiting_for_edit_method_qr = State()
 
@@ -136,20 +139,23 @@ async def init_db():
                 id SERIAL PRIMARY KEY,
                 name TEXT UNIQUE,
                 details TEXT,
+                custom_emoji_id TEXT DEFAULT NULL,
                 qr_file_id TEXT DEFAULT NULL,
                 is_active BOOLEAN DEFAULT TRUE,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
+        await conn.execute("ALTER TABLE deposit_methods ADD COLUMN IF NOT EXISTS custom_emoji_id TEXT DEFAULT NULL")
+        await conn.execute("ALTER TABLE deposit_methods ADD COLUMN IF NOT EXISTS qr_file_id TEXT DEFAULT NULL")
 
         # Populate default deposit methods if empty
         methods_count = await conn.fetchval("SELECT COUNT(*) FROM deposit_methods")
         if methods_count == 0:
             await conn.execute('''
-                INSERT INTO deposit_methods (name, details) VALUES
-                ('Binance ID', '1230141397'),
-                ('USDT (BEP-20)', '0xFbaE715FeFAf06fdD6b203a769685DD25C18678C'),
-                ('UPI (India)', 'adarsh--hacker@fam')
+                INSERT INTO deposit_methods (name, details, custom_emoji_id) VALUES
+                ('Binance ID', '1230141397', '5278467510604160626'),
+                ('USDT (BEP-20)', '0xFbaE715FeFAf06fdD6b203a769685DD25C18678C', '5201692367437974073'),
+                ('UPI (India)', 'adarsh--hacker@fam', '6291696801636424911')
                 ON CONFLICT (name) DO NOTHING
             ''')
 
@@ -392,10 +398,11 @@ def get_buy_keyboard(new_stock: int, old_stock: int):
 async def get_user_deposit_methods_keyboard():
     kb = InlineKeyboardBuilder()
     async with db_pool.acquire() as conn:
-        methods = await conn.fetch("SELECT id, name FROM deposit_methods WHERE is_active=TRUE ORDER BY id ASC")
+        methods = await conn.fetch("SELECT id, name, custom_emoji_id FROM deposit_methods WHERE is_active=TRUE ORDER BY id ASC")
 
     for m in methods:
-        kb.button(text=m['name'], callback_data=f"user_dep_method:{m['id']}", icon_custom_emoji_id="5445353829304387411", style="primary")
+        emoji_id = m['custom_emoji_id'] if m['custom_emoji_id'] else "5445353829304387411"
+        kb.button(text=m['name'], callback_data=f"user_dep_method:{m['id']}", icon_custom_emoji_id=emoji_id, style="primary")
 
     kb.button(text="Back", callback_data="menu_back", icon_custom_emoji_id="5352759161945867747")
     kb.adjust(1)
@@ -643,7 +650,7 @@ async def cb_select_dynamic_deposit_method(call: CallbackQuery, state: FSMContex
     method_id = int(call.data.split(":")[1])
 
     async with db_pool.acquire() as conn:
-        method = await conn.fetchrow("SELECT name, details, qr_file_id FROM deposit_methods WHERE id=$1", method_id)
+        method = await conn.fetchrow("SELECT name, details, custom_emoji_id, qr_file_id FROM deposit_methods WHERE id=$1", method_id)
 
     if not method:
         await call.answer("❌ This deposit method is no longer available.", show_alert=True)
@@ -652,12 +659,13 @@ async def cb_select_dynamic_deposit_method(call: CallbackQuery, state: FSMContex
     method_name = method['name']
     address_val = method['details']
     qr_file_id = method['qr_file_id']
+    emoji_id = method['custom_emoji_id'] if method['custom_emoji_id'] else "5445353829304387411"
 
     await state.update_data(chosen_method=method_name)
     await state.set_state(UserState.deposit_amount)
 
     text = (
-        f'<tg-emoji emoji-id="5445353829304387411">💳</tg-emoji> <b>Deposit via {method_name}</b>\n\n'
+        f'<tg-emoji emoji-id="{emoji_id}">💳</tg-emoji> <b>Deposit via {method_name}</b>\n\n'
         f'<tg-emoji emoji-id="5902449142575141204">📌</tg-emoji> <b>Address / ID:</b>\n'
         f'<code>{address_val}</code>\n\n'
         f'👉 <b>Step 1:</b> Enter the deposit amount in <b>USD ($)</b>:'
@@ -1168,14 +1176,15 @@ async def cb_change_val_start(call: CallbackQuery, state: FSMContext):
 
 async def render_admin_manage_deposits(message: Message):
     async with db_pool.acquire() as conn:
-        methods = await conn.fetch("SELECT id, name, details, qr_file_id FROM deposit_methods ORDER BY id ASC")
+        methods = await conn.fetch("SELECT id, name, details, custom_emoji_id, qr_file_id FROM deposit_methods ORDER BY id ASC")
 
     kb = InlineKeyboardBuilder()
     text = "💳 <b>Deposit Methods & QR Code Manager</b>\n\n"
 
     for m in methods:
         has_qr = "🖼 QR Attached" if m['qr_file_id'] else "❌ No QR"
-        text += f"• <b>{m['name']}</b>: <code>{m['details']}</code> ({has_qr})\n"
+        emoji_display = f"Emoji ID: <code>{m['custom_emoji_id']}</code>" if m['custom_emoji_id'] else "Default Emoji"
+        text += f"• <b>{m['name']}</b>: <code>{m['details']}</code> ({emoji_display} | {has_qr})\n"
         kb.button(text=f"⚙️ Edit {m['name']}", callback_data=f"adm_edit_dep:{m['id']}", icon_custom_emoji_id="5893161718179173515", style="primary")
 
     kb.button(text="➕ Add New Deposit Method", callback_data="adm_add_dep_method", icon_custom_emoji_id="5870458774455587120", style="success")
@@ -1204,14 +1213,29 @@ async def cb_admin_return_change_vals(call: CallbackQuery):
 async def cb_adm_add_dep_method(call: CallbackQuery, state: FSMContext):
     await call.answer()
     await state.set_state(AdminState.waiting_for_new_method_name)
-    await call.message.answer("📝 <b>Step 1/3:</b> Send the <b>Name</b> for the new deposit method (e.g. <code>PayTM UPI</code> or <code>Solana Pay</code>):", parse_mode=ParseMode.HTML)
+    await call.message.answer("📝 <b>Step 1/4:</b> Send the <b>Name</b> for the new deposit method (e.g. <code>PayTM UPI</code> or <code>Solana Pay</code>):", parse_mode=ParseMode.HTML)
 
 @dp.message(AdminState.waiting_for_new_method_name, ~F.text.in_(MENU_BUTTONS))
 async def process_new_method_name(message: Message, state: FSMContext):
     name = message.text.strip()
     await state.update_data(new_m_name=name)
+    await state.set_state(AdminState.waiting_for_new_method_emoji)
+    await message.answer(
+        "✨ <b>Step 2/4:</b> Send the numeric <b>Custom Emoji ID</b> to show on buttons for this method:\n\n"
+        "<i>(Or send <code>skip</code> if you want to use the default money emoji)</i>",
+        parse_mode=ParseMode.HTML
+    )
+
+@dp.message(AdminState.waiting_for_new_method_emoji, ~F.text.in_(MENU_BUTTONS))
+async def process_new_method_emoji(message: Message, state: FSMContext):
+    emoji_val = message.text.strip()
+    custom_emoji_id = None if emoji_val.lower() == "skip" else emoji_val
+    await state.update_data(new_m_emoji=custom_emoji_id)
     await state.set_state(AdminState.waiting_for_new_method_details)
-    await message.answer(f"📌 <b>Step 2/3:</b> Send the <b>Payment Address / ID</b> for <b>{name}</b>:", parse_mode=ParseMode.HTML)
+    
+    data = await state.get_data()
+    name = data.get("new_m_name")
+    await message.answer(f"📌 <b>Step 3/4:</b> Send the <b>Payment Address / ID</b> for <b>{name}</b>:", parse_mode=ParseMode.HTML)
 
 @dp.message(AdminState.waiting_for_new_method_details, ~F.text.in_(MENU_BUTTONS))
 async def process_new_method_details(message: Message, state: FSMContext):
@@ -1219,8 +1243,8 @@ async def process_new_method_details(message: Message, state: FSMContext):
     await state.update_data(new_m_details=details)
     await state.set_state(AdminState.waiting_for_new_method_qr)
     await message.answer(
-        "🖼 <b>Step 3/3:</b> Send the <b>QR Code / Image</b> for this deposit method.\n\n"
-        "<i>(Or send <code>skip</code> if you do not want to set an image)</i>",
+        "🖼 <b>Step 4/4:</b> Send the <b>QR Code / Image</b> for this deposit method.\n\n"
+        "<i>(Or send <code>skip</code> if you do not want to attach an image)</i>",
         parse_mode=ParseMode.HTML
     )
 
@@ -1228,16 +1252,17 @@ async def process_new_method_details(message: Message, state: FSMContext):
 async def process_new_method_qr(message: Message, state: FSMContext):
     data = await state.get_data()
     name = data.get("new_m_name")
+    emoji_id = data.get("new_m_emoji")
     details = data.get("new_m_details")
 
     qr_file_id = message.photo[-1].file_id if message.photo else None
 
     async with db_pool.acquire() as conn:
         await conn.execute('''
-            INSERT INTO deposit_methods (name, details, qr_file_id)
-            VALUES ($1, $2, $3)
-            ON CONFLICT (name) DO UPDATE SET details=$2, qr_file_id=$3
-        ''', name, details, qr_file_id)
+            INSERT INTO deposit_methods (name, details, custom_emoji_id, qr_file_id)
+            VALUES ($1, $2, $3, $4)
+            ON CONFLICT (name) DO UPDATE SET details=$2, custom_emoji_id=$3, qr_file_id=$4
+        ''', name, details, emoji_id, qr_file_id)
 
     await message.answer(f'<tg-emoji emoji-id="6217663806110175239">✅</tg-emoji> <b>New Deposit Method "{name}" added successfully!</b>', parse_mode=ParseMode.HTML, reply_markup=get_admin_menu_keyboard())
     await state.clear()
@@ -1249,7 +1274,7 @@ async def cb_adm_edit_dep(call: CallbackQuery):
     method_id = int(call.data.split(":")[1])
 
     async with db_pool.acquire() as conn:
-        method = await conn.fetchrow("SELECT id, name, details, qr_file_id FROM deposit_methods WHERE id=$1", method_id)
+        method = await conn.fetchrow("SELECT id, name, details, custom_emoji_id, qr_file_id FROM deposit_methods WHERE id=$1", method_id)
 
     if not method:
         await call.answer("Method not found.", show_alert=True)
@@ -1257,6 +1282,7 @@ async def cb_adm_edit_dep(call: CallbackQuery):
 
     kb = InlineKeyboardBuilder()
     kb.button(text="Change Address / ID", callback_data=f"adm_ch_addr:{method_id}", icon_custom_emoji_id="5893161718179173515", style="primary")
+    kb.button(text="Change Custom Emoji ID", callback_data=f"adm_ch_emj:{method_id}", icon_custom_emoji_id="5870458774455587120", style="primary")
     kb.button(text="Set / Replace QR Image", callback_data=f"adm_ch_qr:{method_id}", icon_custom_emoji_id="5206607081334906820", style="primary")
     if method['qr_file_id']:
         kb.button(text="Remove QR Image", callback_data=f"adm_rm_qr:{method_id}", icon_custom_emoji_id="5274099962655816924", style="danger")
@@ -1265,9 +1291,11 @@ async def cb_adm_edit_dep(call: CallbackQuery):
     kb.adjust(1)
 
     qr_status = "🖼 QR Code Active" if method['qr_file_id'] else "❌ No QR Attached"
+    emoji_display = f"<code>{method['custom_emoji_id']}</code>" if method['custom_emoji_id'] else "None (Default)"
     text = (
         f"⚙️ <b>Edit Deposit Method: {method['name']}</b>\n\n"
         f"📌 <b>Current Details:</b> <code>{method['details']}</code>\n"
+        f"✨ <b>Custom Emoji ID:</b> {emoji_display}\n"
         f"📷 <b>QR Status:</b> {qr_status}\n\n"
         f"Choose an action:"
     )
@@ -1295,6 +1323,27 @@ async def process_edit_method_details(message: Message, state: FSMContext):
         await conn.execute("UPDATE deposit_methods SET details=$1 WHERE id=$2", new_details, method_id)
 
     await message.answer('<tg-emoji emoji-id="6217663806110175239">✅</tg-emoji> Payment Address / ID updated successfully!', parse_mode=ParseMode.HTML, reply_markup=get_admin_menu_keyboard())
+    await state.clear()
+
+@dp.callback_query(F.data.startswith("adm_ch_emj:"))
+async def cb_adm_ch_emj(call: CallbackQuery, state: FSMContext):
+    await call.answer()
+    method_id = int(call.data.split(":")[1])
+    await state.update_data(edit_method_id=method_id)
+    await state.set_state(AdminState.waiting_for_edit_method_emoji)
+    await call.message.answer("Send the <b>new Custom Emoji ID</b> (or <code>skip</code> to clear):", parse_mode=ParseMode.HTML)
+
+@dp.message(AdminState.waiting_for_edit_method_emoji, ~F.text.in_(MENU_BUTTONS))
+async def process_edit_method_emoji(message: Message, state: FSMContext):
+    data = await state.get_data()
+    method_id = data.get("edit_method_id")
+    emoji_val = message.text.strip()
+    custom_emoji_id = None if emoji_val.lower() == "skip" else emoji_val
+
+    async with db_pool.acquire() as conn:
+        await conn.execute("UPDATE deposit_methods SET custom_emoji_id=$1 WHERE id=$2", custom_emoji_id, method_id)
+
+    await message.answer('<tg-emoji emoji-id="6217663806110175239">✅</tg-emoji> Custom Emoji ID updated successfully!', parse_mode=ParseMode.HTML, reply_markup=get_admin_menu_keyboard())
     await state.clear()
 
 @dp.callback_query(F.data.startswith("adm_ch_qr:"))
