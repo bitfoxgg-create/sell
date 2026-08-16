@@ -613,6 +613,10 @@ async def cb_buy_menu(call: CallbackQuery):
     except Exception:
         await call.message.answer(text, parse_mode=ParseMode.HTML, reply_markup=get_buy_keyboard(new_stock, old_stock))
 
+# ============================================
+# FIXED PURCHASE LOGIC
+# ============================================
+
 @dp.callback_query(F.data.in_({"buy_new", "buy_old"}))
 async def process_purchase(call: CallbackQuery):
     acc_type = "new" if call.data == "buy_new" else "old"
@@ -620,21 +624,27 @@ async def process_purchase(call: CallbackQuery):
     user_id = call.from_user.id
     type_emoji = '<tg-emoji emoji-id="5253742260054409879">🆕</tg-emoji>' if acc_type == "new" else '<tg-emoji emoji-id="5008025248314950702">🏛</tg-emoji>'
 
-    bal = await get_user_balance(user_id)
-    if bal < price:
-        await call.answer(
-            f"⚠️ Insufficient Balance!\n\n"
-            f"Required: ${price:.2f}\n"
-            f"Your Balance: ${bal:.2f}\n\n"
-            f"Please deposit funds from the Main Menu to continue.",
-            show_alert=True
-        )
-        return
-
-    await call.answer()
+    # Ensure user exists first
+    await ensure_user(user_id, call.from_user.username)
 
     async with db_pool.acquire() as conn:
         async with conn.transaction():
+            # Fetch locked real-time balance
+            user_row = await conn.fetchrow("SELECT balance FROM users WHERE user_id=$1 FOR UPDATE", user_id)
+            current_bal = float(user_row['balance']) if user_row and user_row['balance'] is not None else 0.0
+
+            # Safe floating-point check with tolerance
+            if current_bal + 0.0001 < price:
+                await call.answer(
+                    f"⚠️ Insufficient Balance!\n\n"
+                    f"Required: ${price:.2f}\n"
+                    f"Your Balance: ${current_bal:.2f}\n\n"
+                    f"Please deposit funds from the Main Menu to continue.",
+                    show_alert=True
+                )
+                return
+
+            # Check and lock available stock item
             item = await conn.fetchrow(
                 "SELECT id, credentials FROM inventory WHERE account_type=$1 AND status='available' ORDER BY id ASC LIMIT 1 FOR UPDATE",
                 acc_type
@@ -644,6 +654,8 @@ async def process_purchase(call: CallbackQuery):
                 return
 
             warranty_date = datetime.utcnow() + timedelta(days=WARRANTY_DAYS)
+            
+            # Deduct balance and create order
             await conn.execute("UPDATE users SET balance = balance - $1 WHERE user_id=$2", price, user_id)
             await conn.execute("UPDATE inventory SET status='sold' WHERE id=$1", item['id'])
             order_id = await conn.fetchval('''
@@ -655,6 +667,7 @@ async def process_purchase(call: CallbackQuery):
                 VALUES ($1, 'purchase', $2, $3)
             ''', user_id, -price, f"Purchased {acc_type.upper()} Gmail #{order_id}")
 
+    await call.answer()
     formatted_creds = format_account_credentials(item['credentials'])
 
     text = (
@@ -744,7 +757,7 @@ async def cb_noop(call: CallbackQuery):
     await call.answer()
 
 # ============================================
-# DYNAMIC USER DEPOSIT SYSTEM (SMOOTH TRANSITIONS)
+# DYNAMIC USER DEPOSIT SYSTEM
 # ============================================
 
 @dp.callback_query(F.data == "menu_deposit")
@@ -867,6 +880,10 @@ async def process_deposit_proof(message: Message, state: FSMContext):
     )
     await state.clear()
 
+# ============================================
+# FIXED DEPOSIT APPROVAL (UPSERT BALANCE)
+# ============================================
+
 @dp.callback_query(F.data.startswith("dep_app:"))
 async def cb_admin_approve_deposit(call: CallbackQuery):
     await call.answer()
@@ -878,12 +895,23 @@ async def cb_admin_approve_deposit(call: CallbackQuery):
             return
 
         user_id = dep['user_id']
-        amount = dep['amount']
+        amount = float(dep['amount'])
 
         async with conn.transaction():
             await conn.execute("UPDATE deposits SET status='approved' WHERE id=$1", deposit_id)
-            await conn.execute("UPDATE users SET balance = balance + $1 WHERE user_id=$2", amount, user_id)
-            await conn.execute("INSERT INTO transactions (user_id, type, amount, note) VALUES ($1, 'deposit', $2, $3)", user_id, amount, f"Deposit #{deposit_id} Approved")
+            
+            # Upsert ensures user record exists and balance is properly credited
+            await conn.execute('''
+                INSERT INTO users (user_id, balance)
+                VALUES ($1, $2)
+                ON CONFLICT (user_id)
+                DO UPDATE SET balance = users.balance + EXCLUDED.balance
+            ''', user_id, amount)
+            
+            await conn.execute(
+                "INSERT INTO transactions (user_id, type, amount, note) VALUES ($1, 'deposit', $2, $3)", 
+                user_id, amount, f"Deposit #{deposit_id} Approved"
+            )
 
     new_caption = (call.message.caption or "") + "\n\n<tg-emoji emoji-id=\"6217663806110175239\">✅</tg-emoji> <b>APPROVED BY ADMIN</b>"
     try:
