@@ -34,11 +34,6 @@ PRICE_OLD_GMAIL = 0.45
 WARRANTY_DAYS = 7
 USD_TO_INR = 96.30
 
-# Payment Gateways Info (Defaults)
-BINANCE_PAY_ID = "1230141397"
-USDT_BEP20_ADDRESS = "0xFbaE715FeFAf06fdD6b203a769685DD25C18678C"
-UPI_ID = "adarsh--hacker@fam"
-
 # Dynamic Bot Settings & Caches
 BOT_STATUS = True
 MUST_JOIN_CHANNEL = None
@@ -94,9 +89,12 @@ class AdminState(StatesGroup):
     waiting_for_new_price = State()
     waiting_for_old_price = State()
     waiting_for_warranty_days = State()
-    waiting_for_binance_id = State()
-    waiting_for_usdt_address = State()
-    waiting_for_upi_id = State()
+    # Dynamic Deposit Management States
+    waiting_for_new_method_name = State()
+    waiting_for_new_method_details = State()
+    waiting_for_new_method_qr = State()
+    waiting_for_edit_method_details = State()
+    waiting_for_edit_method_qr = State()
 
 # ============================================
 # DATABASE INITIALIZATION & CACHE
@@ -131,7 +129,29 @@ async def init_db():
         ''')
         await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS username TEXT")
         await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS balance DOUBLE PRECISION DEFAULT 0.0")
-        await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+
+        # Dynamic Deposit Methods Table
+        await conn.execute('''
+            CREATE TABLE IF NOT EXISTS deposit_methods (
+                id SERIAL PRIMARY KEY,
+                name TEXT UNIQUE,
+                details TEXT,
+                qr_file_id TEXT DEFAULT NULL,
+                is_active BOOLEAN DEFAULT TRUE,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+
+        # Populate default deposit methods if empty
+        methods_count = await conn.fetchval("SELECT COUNT(*) FROM deposit_methods")
+        if methods_count == 0:
+            await conn.execute('''
+                INSERT INTO deposit_methods (name, details) VALUES
+                ('Binance ID', '1230141397'),
+                ('USDT (BEP-20)', '0xFbaE715FeFAf06fdD6b203a769685DD25C18678C'),
+                ('UPI (India)', 'adarsh--hacker@fam')
+                ON CONFLICT (name) DO NOTHING
+            ''')
 
         # Inventory Table (Stock)
         await conn.execute('''
@@ -181,14 +201,14 @@ async def init_db():
             )
         ''')
 
-        # Banned Users
+        # Banned Users Table
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS banned_users (
                 user_id BIGINT PRIMARY KEY
             )
         ''')
 
-        # Settings
+        # Settings Table
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS bot_settings (
                 key TEXT PRIMARY KEY,
@@ -198,7 +218,6 @@ async def init_db():
 
 async def load_settings_and_cache():
     global BANNED_USERS_CACHE, MUST_JOIN_CHANNEL, BOT_STATUS, PRICE_NEW_GMAIL, PRICE_OLD_GMAIL, WARRANTY_DAYS
-    global BINANCE_PAY_ID, USDT_BEP20_ADDRESS, UPI_ID
 
     async with db_pool.acquire() as conn:
         rows = await conn.fetch("SELECT user_id FROM banned_users")
@@ -221,18 +240,6 @@ async def load_settings_and_cache():
         w_days = await conn.fetchval("SELECT value FROM bot_settings WHERE key='warranty_days'")
         if w_days:
             WARRANTY_DAYS = int(w_days)
-
-        b_id = await conn.fetchval("SELECT value FROM bot_settings WHERE key='binance_pay_id'")
-        if b_id:
-            BINANCE_PAY_ID = b_id
-
-        u_addr = await conn.fetchval("SELECT value FROM bot_settings WHERE key='usdt_bep20_address'")
-        if u_addr:
-            USDT_BEP20_ADDRESS = u_addr
-
-        upi_val = await conn.fetchval("SELECT value FROM bot_settings WHERE key='upi_id'")
-        if upi_val:
-            UPI_ID = upi_val
 
 # ============================================
 # HELPERS & CREDENTIAL FORMATTER
@@ -258,7 +265,7 @@ async def get_stock_counts():
     return new_count, old_count
 
 def format_account_credentials(raw_creds: str) -> str:
-    """Parses raw text (supports ':', '|', or space) into a clear display format."""
+    """Parses raw text into clear display format."""
     if ":" in raw_creds:
         parts = [p.strip() for p in raw_creds.split(":")]
     elif "|" in raw_creds:
@@ -355,7 +362,7 @@ async def render_transaction_history_page(target_user_id: int, page: int = 1, is
         kb.row(*nav_buttons)
 
     if not is_admin:
-        kb.row(InlineKeyboardButton(text="⬅️ Back", callback_data="menu_back", icon_custom_emoji_id="5352759161945867747"))
+        kb.row(InlineKeyboardButton(text="Back", callback_data="menu_back", icon_custom_emoji_id="5352759161945867747"))
 
     return text, kb.as_markup()
 
@@ -382,11 +389,14 @@ def get_buy_keyboard(new_stock: int, old_stock: int):
     kb.adjust(1)
     return kb.as_markup()
 
-def get_deposit_methods_keyboard():
+async def get_user_deposit_methods_keyboard():
     kb = InlineKeyboardBuilder()
-    kb.button(text="Binance ID", callback_data="dep_binance", icon_custom_emoji_id="5417924076503062111", style="primary")
-    kb.button(text="USDT (BEP-20)", callback_data="dep_usdt", icon_custom_emoji_id="5197434882321567830", style="primary")
-    kb.button(text="UPI (India)", callback_data="dep_upi", icon_custom_emoji_id="6278557702109013266", style="success")
+    async with db_pool.acquire() as conn:
+        methods = await conn.fetch("SELECT id, name FROM deposit_methods WHERE is_active=TRUE ORDER BY id ASC")
+
+    for m in methods:
+        kb.button(text=m['name'], callback_data=f"user_dep_method:{m['id']}", icon_custom_emoji_id="5445353829304387411", style="primary")
+
     kb.button(text="Back", callback_data="menu_back", icon_custom_emoji_id="5352759161945867747")
     kb.adjust(1)
     return kb.as_markup()
@@ -396,10 +406,8 @@ def get_change_values_inline_keyboard():
     kb.button(text="New Gmail Price", callback_data="ch_val:new_price", icon_custom_emoji_id="5253742260054409879", style="primary")
     kb.button(text="Old Gmail Price", callback_data="ch_val:old_price", icon_custom_emoji_id="5008025248314950702", style="primary")
     kb.button(text="Warranty Days", callback_data="ch_val:warranty", icon_custom_emoji_id="5262831879731555779", style="primary")
-    kb.button(text="Binance Pay ID", callback_data="ch_val:binance_id", icon_custom_emoji_id="6005570495603282482", style="primary")
-    kb.button(text="USDT BEP-20 Address", callback_data="ch_val:usdt_addr", icon_custom_emoji_id="5197434882321567830", style="primary")
-    kb.button(text="UPI ID", callback_data="ch_val:upi_id", icon_custom_emoji_id="6278557702109013266", style="primary")
-    kb.adjust(1, 1, 1, 1, 1, 1)
+    kb.button(text="Manage Deposit Methods", callback_data="ch_val:manage_deposits", icon_custom_emoji_id="5445353829304387411", style="success")
+    kb.adjust(1)
     return kb.as_markup()
 
 def get_admin_menu_keyboard():
@@ -455,7 +463,11 @@ async def cb_menu_back(call: CallbackQuery, state: FSMContext):
         f'<tg-emoji emoji-id="5262831879731555779">🛡</tg-emoji> <b>Warranty:</b> {WARRANTY_DAYS} Days Replacement\n\n'
         f'Choose an option below to proceed:'
     )
-    await call.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=get_main_menu_keyboard())
+    try:
+        await call.message.delete()
+    except Exception:
+        pass
+    await call.message.answer(text, parse_mode=ParseMode.HTML, reply_markup=get_main_menu_keyboard())
 
 @dp.callback_query(F.data == "menu_balance")
 async def cb_balance(call: CallbackQuery):
@@ -472,7 +484,10 @@ async def cb_balance(call: CallbackQuery):
     kb.button(text="Deposit Now", callback_data="menu_deposit", icon_custom_emoji_id="5445353829304387411", style="primary")
     kb.button(text="Back", callback_data="menu_back", icon_custom_emoji_id="5352759161945867747")
     kb.adjust(1)
-    await call.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=kb.as_markup())
+    try:
+        await call.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=kb.as_markup())
+    except Exception:
+        await call.message.answer(text, parse_mode=ParseMode.HTML, reply_markup=kb.as_markup())
 
 @dp.callback_query(F.data == "menu_buy")
 async def cb_buy_menu(call: CallbackQuery):
@@ -484,7 +499,10 @@ async def cb_buy_menu(call: CallbackQuery):
         f'<tg-emoji emoji-id="5008025248314950702">🏛</tg-emoji> <b>Old Gmail:</b> ${PRICE_OLD_GMAIL:.2f} (Stock: {old_stock})\n\n'
         f'<tg-emoji emoji-id="5262831879731555779">🛡</tg-emoji> <i>Every purchase is covered by an automated {WARRANTY_DAYS}-day warranty.</i>'
     )
-    await call.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=get_buy_keyboard(new_stock, old_stock))
+    try:
+        await call.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=get_buy_keyboard(new_stock, old_stock))
+    except Exception:
+        await call.message.answer(text, parse_mode=ParseMode.HTML, reply_markup=get_buy_keyboard(new_stock, old_stock))
 
 @dp.callback_query(F.data.in_({"buy_new", "buy_old"}))
 async def process_purchase(call: CallbackQuery):
@@ -536,7 +554,10 @@ async def process_purchase(call: CallbackQuery):
     kb.button(text="Buy Another", callback_data="menu_buy", icon_custom_emoji_id="5377548235709619284", style="success")
     kb.button(text="Main Menu", callback_data="menu_back", icon_custom_emoji_id="5352759161945867747")
     kb.adjust(2)
-    await call.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=kb.as_markup())
+    try:
+        await call.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=kb.as_markup())
+    except Exception:
+        await call.message.answer(text, parse_mode=ParseMode.HTML, reply_markup=kb.as_markup())
 
 @dp.callback_query(F.data == "menu_orders")
 async def cb_view_orders(call: CallbackQuery):
@@ -570,13 +591,19 @@ async def cb_view_orders(call: CallbackQuery):
 
     kb = InlineKeyboardBuilder()
     kb.button(text="Back", callback_data="menu_back", icon_custom_emoji_id="5352759161945867747")
-    await call.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=kb.as_markup())
+    try:
+        await call.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=kb.as_markup())
+    except Exception:
+        await call.message.answer(text, parse_mode=ParseMode.HTML, reply_markup=kb.as_markup())
 
 @dp.callback_query(F.data == "menu_history")
 async def cb_history(call: CallbackQuery):
     await call.answer()
     text, markup = await render_transaction_history_page(call.from_user.id, page=1, is_admin=False)
-    await call.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
+    try:
+        await call.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
+    except Exception:
+        await call.message.answer(text, parse_mode=ParseMode.HTML, reply_markup=markup)
 
 @dp.callback_query(F.data.startswith("user_tx_page:"))
 async def cb_user_tx_page(call: CallbackQuery):
@@ -593,27 +620,38 @@ async def cb_noop(call: CallbackQuery):
     await call.answer()
 
 # ============================================
-# DEPOSIT SYSTEM & PROOF
+# DYNAMIC USER DEPOSIT SYSTEM (WITH QR/IMAGE)
 # ============================================
 
 @dp.callback_query(F.data == "menu_deposit")
 async def cb_deposit_menu(call: CallbackQuery, state: FSMContext):
     await state.clear()
     await call.answer()
+    markup = await get_user_deposit_methods_keyboard()
     text = (
-        f'<tg-emoji emoji-id="5445353829304387411">💳</tg-emoji> <b>Choose Payment Method:</b>\n\n'
-        f'• <b>Binance ID:</b> Instant transfer via Binance Pay\n'
-        f'• <b>USDT (BEP-20):</b> Binance Smart Chain network\n'
-        f'• <b>UPI (India):</b> Instant INR transfer ($1 = ₹{USD_TO_INR:.2f})\n\n'
-        f'Select an option below:'
+        f'<tg-emoji emoji-id="5445353829304387411">💳</tg-emoji> <b>Choose Payment Option:</b>\n\n'
+        f'Select your preferred payment method below to view details and deposit funds:'
     )
-    await call.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=get_deposit_methods_keyboard())
+    try:
+        await call.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
+    except Exception:
+        await call.message.answer(text, parse_mode=ParseMode.HTML, reply_markup=markup)
 
-@dp.callback_query(F.data.in_({"dep_binance", "dep_usdt", "dep_upi"}))
-async def cb_select_deposit_method(call: CallbackQuery, state: FSMContext):
+@dp.callback_query(F.data.startswith("user_dep_method:"))
+async def cb_select_dynamic_deposit_method(call: CallbackQuery, state: FSMContext):
     await call.answer()
-    method_name = "Binance Pay" if call.data == "dep_binance" else ("USDT (BEP-20)" if call.data == "dep_usdt" else "UPI")
-    address_val = BINANCE_PAY_ID if call.data == "dep_binance" else (USDT_BEP20_ADDRESS if call.data == "dep_usdt" else UPI_ID)
+    method_id = int(call.data.split(":")[1])
+
+    async with db_pool.acquire() as conn:
+        method = await conn.fetchrow("SELECT name, details, qr_file_id FROM deposit_methods WHERE id=$1", method_id)
+
+    if not method:
+        await call.answer("❌ This deposit method is no longer available.", show_alert=True)
+        return
+
+    method_name = method['name']
+    address_val = method['details']
+    qr_file_id = method['qr_file_id']
 
     await state.update_data(chosen_method=method_name)
     await state.set_state(UserState.deposit_amount)
@@ -628,7 +666,16 @@ async def cb_select_deposit_method(call: CallbackQuery, state: FSMContext):
     kb.button(text="Copy Address / ID", copy_text=CopyTextButton(text=address_val), icon_custom_emoji_id="5271604874419647061")
     kb.button(text="Cancel", callback_data="menu_back", icon_custom_emoji_id="5352759161945867747")
     kb.adjust(1)
-    await call.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=kb.as_markup())
+
+    try:
+        await call.message.delete()
+    except Exception:
+        pass
+
+    if qr_file_id:
+        await call.message.answer_photo(photo=qr_file_id, caption=text, parse_mode=ParseMode.HTML, reply_markup=kb.as_markup())
+    else:
+        await call.message.answer(text, parse_mode=ParseMode.HTML, reply_markup=kb.as_markup())
 
 @dp.message(UserState.deposit_amount, F.text, ~F.text.startswith("/"))
 async def process_deposit_amount(message: Message, state: FSMContext):
@@ -755,7 +802,10 @@ async def cb_support(call: CallbackQuery, state: FSMContext):
     )
     kb = InlineKeyboardBuilder()
     kb.button(text="Cancel", callback_data="menu_back", icon_custom_emoji_id="5352759161945867747")
-    await call.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=kb.as_markup())
+    try:
+        await call.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=kb.as_markup())
+    except Exception:
+        await call.message.answer(text, parse_mode=ParseMode.HTML, reply_markup=kb.as_markup())
 
 @dp.message(UserState.support_message, ~F.text.startswith("/"))
 async def process_user_support_msg(message: Message, state: FSMContext):
@@ -1083,20 +1133,20 @@ async def process_admin_broadcast(message: Message, state: FSMContext):
     await status_msg.edit_text(f'<tg-emoji emoji-id="6217663806110175239">✅</tg-emoji> <b>Broadcast Completed!</b>\n\n🟢 Sent: {sent}\n🔴 Failed: {failed}', parse_mode=ParseMode.HTML)
     await state.clear()
 
-# --- CHANGE VALUES MENU & ACTIONS ---
+# ============================================
+# CHANGE VALUES & DYNAMIC DEPOSIT CONFIG
+# ============================================
+
 @dp.message(F.text == "⚙️ Change Values", StateFilter("*"))
 async def admin_change_values_menu(message: Message):
     if message.from_user.id != ADMIN_ID:
         return
     text = (
-        f'<tg-emoji emoji-id="5893161718179173515">⚙️</tg-emoji> <b>Current System Values & Deposit Info:</b>\n\n'
+        f'<tg-emoji emoji-id="5893161718179173515">⚙️</tg-emoji> <b>Current System Values:</b>\n\n'
         f'• <tg-emoji emoji-id="5253742260054409879">🆕</tg-emoji> <b>New Gmail Price:</b> ${PRICE_NEW_GMAIL:.2f}\n'
         f'• <tg-emoji emoji-id="5008025248314950702">🏛</tg-emoji> <b>Old Gmail Price:</b> ${PRICE_OLD_GMAIL:.2f}\n'
-        f'• <tg-emoji emoji-id="5262831879731555779">🛡</tg-emoji> <b>Warranty Duration:</b> {WARRANTY_DAYS} Days\n'
-        f'• <b>Binance Pay ID:</b> <code>{BINANCE_PAY_ID}</code>\n'
-        f'• <b>USDT Address:</b> <code>{USDT_BEP20_ADDRESS}</code>\n'
-        f'• <b>UPI ID:</b> <code>{UPI_ID}</code>\n\n'
-        f'Select a value to update:'
+        f'• <tg-emoji emoji-id="5262831879731555779">🛡</tg-emoji> <b>Warranty Duration:</b> {WARRANTY_DAYS} Days\n\n'
+        f'Select an option below to update pricing or manage deposit methods & QR codes:'
     )
     await message.answer(text, parse_mode=ParseMode.HTML, reply_markup=get_change_values_inline_keyboard())
 
@@ -1113,15 +1163,175 @@ async def cb_change_val_start(call: CallbackQuery, state: FSMContext):
     elif action == "warranty":
         await state.set_state(AdminState.waiting_for_warranty_days)
         await call.message.answer("Send new warranty duration in <b>days</b> (e.g. <code>7</code>):", parse_mode=ParseMode.HTML)
-    elif action == "binance_id":
-        await state.set_state(AdminState.waiting_for_binance_id)
-        await call.message.answer("Send the new <b>Binance Pay ID</b>:", parse_mode=ParseMode.HTML)
-    elif action == "usdt_addr":
-        await state.set_state(AdminState.waiting_for_usdt_address)
-        await call.message.answer("Send the new <b>USDT (BEP-20) Address</b>:", parse_mode=ParseMode.HTML)
-    elif action == "upi_id":
-        await state.set_state(AdminState.waiting_for_upi_id)
-        await call.message.answer("Send the new <b>UPI ID</b> (e.g. <code>name@upi</code>):", parse_mode=ParseMode.HTML)
+    elif action == "manage_deposits":
+        await render_admin_manage_deposits(call.message)
+
+async def render_admin_manage_deposits(message: Message):
+    async with db_pool.acquire() as conn:
+        methods = await conn.fetch("SELECT id, name, details, qr_file_id FROM deposit_methods ORDER BY id ASC")
+
+    kb = InlineKeyboardBuilder()
+    text = "💳 <b>Deposit Methods & QR Code Manager</b>\n\n"
+
+    for m in methods:
+        has_qr = "🖼 QR Attached" if m['qr_file_id'] else "❌ No QR"
+        text += f"• <b>{m['name']}</b>: <code>{m['details']}</code> ({has_qr})\n"
+        kb.button(text=f"⚙️ Edit {m['name']}", callback_data=f"adm_edit_dep:{m['id']}", icon_custom_emoji_id="5893161718179173515", style="primary")
+
+    kb.button(text="➕ Add New Deposit Method", callback_data="adm_add_dep_method", icon_custom_emoji_id="5870458774455587120", style="success")
+    kb.button(text="Back", callback_data="admin_return_change_vals", icon_custom_emoji_id="5352759161945867747")
+    kb.adjust(1)
+
+    try:
+        await message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=kb.as_markup())
+    except Exception:
+        await message.answer(text, parse_mode=ParseMode.HTML, reply_markup=kb.as_markup())
+
+@dp.callback_query(F.data == "admin_return_change_vals")
+async def cb_admin_return_change_vals(call: CallbackQuery):
+    await call.answer()
+    text = (
+        f'<tg-emoji emoji-id="5893161718179173515">⚙️</tg-emoji> <b>Current System Values:</b>\n\n'
+        f'• <tg-emoji emoji-id="5253742260054409879">🆕</tg-emoji> <b>New Gmail Price:</b> ${PRICE_NEW_GMAIL:.2f}\n'
+        f'• <tg-emoji emoji-id="5008025248314950702">🏛</tg-emoji> <b>Old Gmail Price:</b> ${PRICE_OLD_GMAIL:.2f}\n'
+        f'• <tg-emoji emoji-id="5262831879731555779">🛡</tg-emoji> <b>Warranty Duration:</b> {WARRANTY_DAYS} Days\n\n'
+        f'Select an option below to update:'
+    )
+    await call.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=get_change_values_inline_keyboard())
+
+# --- ADD NEW DEPOSIT METHOD ---
+@dp.callback_query(F.data == "adm_add_dep_method")
+async def cb_adm_add_dep_method(call: CallbackQuery, state: FSMContext):
+    await call.answer()
+    await state.set_state(AdminState.waiting_for_new_method_name)
+    await call.message.answer("📝 <b>Step 1/3:</b> Send the <b>Name</b> for the new deposit method (e.g. <code>PayTM UPI</code> or <code>Solana Pay</code>):", parse_mode=ParseMode.HTML)
+
+@dp.message(AdminState.waiting_for_new_method_name, ~F.text.in_(MENU_BUTTONS))
+async def process_new_method_name(message: Message, state: FSMContext):
+    name = message.text.strip()
+    await state.update_data(new_m_name=name)
+    await state.set_state(AdminState.waiting_for_new_method_details)
+    await message.answer(f"📌 <b>Step 2/3:</b> Send the <b>Payment Address / ID</b> for <b>{name}</b>:", parse_mode=ParseMode.HTML)
+
+@dp.message(AdminState.waiting_for_new_method_details, ~F.text.in_(MENU_BUTTONS))
+async def process_new_method_details(message: Message, state: FSMContext):
+    details = message.text.strip()
+    await state.update_data(new_m_details=details)
+    await state.set_state(AdminState.waiting_for_new_method_qr)
+    await message.answer(
+        "🖼 <b>Step 3/3:</b> Send the <b>QR Code / Image</b> for this deposit method.\n\n"
+        "<i>(Or send <code>skip</code> if you do not want to set an image)</i>",
+        parse_mode=ParseMode.HTML
+    )
+
+@dp.message(AdminState.waiting_for_new_method_qr, F.photo | F.text)
+async def process_new_method_qr(message: Message, state: FSMContext):
+    data = await state.get_data()
+    name = data.get("new_m_name")
+    details = data.get("new_m_details")
+
+    qr_file_id = message.photo[-1].file_id if message.photo else None
+
+    async with db_pool.acquire() as conn:
+        await conn.execute('''
+            INSERT INTO deposit_methods (name, details, qr_file_id)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (name) DO UPDATE SET details=$2, qr_file_id=$3
+        ''', name, details, qr_file_id)
+
+    await message.answer(f'<tg-emoji emoji-id="6217663806110175239">✅</tg-emoji> <b>New Deposit Method "{name}" added successfully!</b>', parse_mode=ParseMode.HTML, reply_markup=get_admin_menu_keyboard())
+    await state.clear()
+
+# --- EDIT EXISTING DEPOSIT METHOD ---
+@dp.callback_query(F.data.startswith("adm_edit_dep:"))
+async def cb_adm_edit_dep(call: CallbackQuery):
+    await call.answer()
+    method_id = int(call.data.split(":")[1])
+
+    async with db_pool.acquire() as conn:
+        method = await conn.fetchrow("SELECT id, name, details, qr_file_id FROM deposit_methods WHERE id=$1", method_id)
+
+    if not method:
+        await call.answer("Method not found.", show_alert=True)
+        return
+
+    kb = InlineKeyboardBuilder()
+    kb.button(text="Change Address / ID", callback_data=f"adm_ch_addr:{method_id}", icon_custom_emoji_id="5893161718179173515", style="primary")
+    kb.button(text="Set / Replace QR Image", callback_data=f"adm_ch_qr:{method_id}", icon_custom_emoji_id="5206607081334906820", style="primary")
+    if method['qr_file_id']:
+        kb.button(text="Remove QR Image", callback_data=f"adm_rm_qr:{method_id}", icon_custom_emoji_id="5274099962655816924", style="danger")
+    kb.button(text="🗑 Delete Method", callback_data=f"adm_del_dep:{method_id}", icon_custom_emoji_id="5274099962655816924", style="danger")
+    kb.button(text="Back", callback_data="ch_val:manage_deposits", icon_custom_emoji_id="5352759161945867747")
+    kb.adjust(1)
+
+    qr_status = "🖼 QR Code Active" if method['qr_file_id'] else "❌ No QR Attached"
+    text = (
+        f"⚙️ <b>Edit Deposit Method: {method['name']}</b>\n\n"
+        f"📌 <b>Current Details:</b> <code>{method['details']}</code>\n"
+        f"📷 <b>QR Status:</b> {qr_status}\n\n"
+        f"Choose an action:"
+    )
+
+    try:
+        await call.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=kb.as_markup())
+    except Exception:
+        await call.message.answer(text, parse_mode=ParseMode.HTML, reply_markup=kb.as_markup())
+
+@dp.callback_query(F.data.startswith("adm_ch_addr:"))
+async def cb_adm_ch_addr(call: CallbackQuery, state: FSMContext):
+    await call.answer()
+    method_id = int(call.data.split(":")[1])
+    await state.update_data(edit_method_id=method_id)
+    await state.set_state(AdminState.waiting_for_edit_method_details)
+    await call.message.answer("Send the <b>new Payment Address / ID</b>:", parse_mode=ParseMode.HTML)
+
+@dp.message(AdminState.waiting_for_edit_method_details, ~F.text.in_(MENU_BUTTONS))
+async def process_edit_method_details(message: Message, state: FSMContext):
+    data = await state.get_data()
+    method_id = data.get("edit_method_id")
+    new_details = message.text.strip()
+
+    async with db_pool.acquire() as conn:
+        await conn.execute("UPDATE deposit_methods SET details=$1 WHERE id=$2", new_details, method_id)
+
+    await message.answer('<tg-emoji emoji-id="6217663806110175239">✅</tg-emoji> Payment Address / ID updated successfully!', parse_mode=ParseMode.HTML, reply_markup=get_admin_menu_keyboard())
+    await state.clear()
+
+@dp.callback_query(F.data.startswith("adm_ch_qr:"))
+async def cb_adm_ch_qr(call: CallbackQuery, state: FSMContext):
+    await call.answer()
+    method_id = int(call.data.split(":")[1])
+    await state.update_data(edit_method_id=method_id)
+    await state.set_state(AdminState.waiting_for_edit_method_qr)
+    await call.message.answer("📸 <b>Send the new QR Code photo / Image now:</b>", parse_mode=ParseMode.HTML)
+
+@dp.message(AdminState.waiting_for_edit_method_qr, F.photo)
+async def process_edit_method_qr(message: Message, state: FSMContext):
+    data = await state.get_data()
+    method_id = data.get("edit_method_id")
+    qr_file_id = message.photo[-1].file_id
+
+    async with db_pool.acquire() as conn:
+        await conn.execute("UPDATE deposit_methods SET qr_file_id=$1 WHERE id=$2", qr_file_id, method_id)
+
+    await message.answer('<tg-emoji emoji-id="6217663806110175239">✅</tg-emoji> <b>QR Code / Image updated successfully!</b>', parse_mode=ParseMode.HTML, reply_markup=get_admin_menu_keyboard())
+    await state.clear()
+
+@dp.callback_query(F.data.startswith("adm_rm_qr:"))
+async def cb_adm_rm_qr(call: CallbackQuery):
+    await call.answer()
+    method_id = int(call.data.split(":")[1])
+    async with db_pool.acquire() as conn:
+        await conn.execute("UPDATE deposit_methods SET qr_file_id=NULL WHERE id=$1", method_id)
+    await call.message.answer('<tg-emoji emoji-id="6217663806110175239">✅</tg-emoji> QR Code removed from this method.', reply_markup=get_admin_menu_keyboard())
+
+@dp.callback_query(F.data.startswith("adm_del_dep:"))
+async def cb_adm_del_dep(call: CallbackQuery):
+    await call.answer()
+    method_id = int(call.data.split(":")[1])
+    async with db_pool.acquire() as conn:
+        await conn.execute("DELETE FROM deposit_methods WHERE id=$1", method_id)
+    await call.message.answer('<tg-emoji emoji-id="6217663806110175239">✅</tg-emoji> Deposit method deleted successfully.', reply_markup=get_admin_menu_keyboard())
 
 @dp.message(AdminState.waiting_for_new_price, ~F.text.in_(MENU_BUTTONS))
 async def process_change_new_price(message: Message, state: FSMContext):
@@ -1160,36 +1370,6 @@ async def process_change_warranty(message: Message, state: FSMContext):
         await message.answer(f'<tg-emoji emoji-id="6217663806110175239">✅</tg-emoji> Warranty duration set to <b>{val} Days</b>.', parse_mode=ParseMode.HTML, reply_markup=get_admin_menu_keyboard())
     except Exception as e:
         await message.answer(f'<tg-emoji emoji-id="5274099962655816924">❌</tg-emoji> Error: {e}', reply_markup=get_admin_menu_keyboard())
-    await state.clear()
-
-@dp.message(AdminState.waiting_for_binance_id, ~F.text.in_(MENU_BUTTONS))
-async def process_change_binance_id(message: Message, state: FSMContext):
-    global BINANCE_PAY_ID
-    new_val = message.text.strip()
-    BINANCE_PAY_ID = new_val
-    async with db_pool.acquire() as conn:
-        await conn.execute("INSERT INTO bot_settings (key, value) VALUES ('binance_pay_id', $1) ON CONFLICT (key) DO UPDATE SET value = $1", new_val)
-    await message.answer(f'<tg-emoji emoji-id="6217663806110175239">✅</tg-emoji> Binance Pay ID updated to: <code>{new_val}</code>', parse_mode=ParseMode.HTML, reply_markup=get_admin_menu_keyboard())
-    await state.clear()
-
-@dp.message(AdminState.waiting_for_usdt_address, ~F.text.in_(MENU_BUTTONS))
-async def process_change_usdt_addr(message: Message, state: FSMContext):
-    global USDT_BEP20_ADDRESS
-    new_val = message.text.strip()
-    USDT_BEP20_ADDRESS = new_val
-    async with db_pool.acquire() as conn:
-        await conn.execute("INSERT INTO bot_settings (key, value) VALUES ('usdt_bep20_address', $1) ON CONFLICT (key) DO UPDATE SET value = $1", new_val)
-    await message.answer(f'<tg-emoji emoji-id="6217663806110175239">✅</tg-emoji> USDT (BEP-20) Address updated to: <code>{new_val}</code>', parse_mode=ParseMode.HTML, reply_markup=get_admin_menu_keyboard())
-    await state.clear()
-
-@dp.message(AdminState.waiting_for_upi_id, ~F.text.in_(MENU_BUTTONS))
-async def process_change_upi_id(message: Message, state: FSMContext):
-    global UPI_ID
-    new_val = message.text.strip()
-    UPI_ID = new_val
-    async with db_pool.acquire() as conn:
-        await conn.execute("INSERT INTO bot_settings (key, value) VALUES ('upi_id', $1) ON CONFLICT (key) DO UPDATE SET value = $1", new_val)
-    await message.answer(f'<tg-emoji emoji-id="6217663806110175239">✅</tg-emoji> UPI ID updated to: <code>{new_val}</code>', parse_mode=ParseMode.HTML, reply_markup=get_admin_menu_keyboard())
     await state.clear()
 
 @dp.message(F.text == "🔍 Find ID", StateFilter("*"))
