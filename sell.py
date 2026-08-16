@@ -84,6 +84,7 @@ class AdminState(StatesGroup):
     waiting_for_ban_user = State()
     waiting_for_unban_user = State()
     waiting_for_broadcast = State()
+    waiting_for_broadcast_button = State()
     waiting_for_user_transactions = State()
     waiting_for_find_id_query = State()
     waiting_for_channel_link = State()
@@ -757,7 +758,7 @@ async def cb_noop(call: CallbackQuery):
     await call.answer()
 
 # ============================================
-# DYNAMIC USER DEPOSIT SYSTEM
+# DYNAMIC USER DEPOSIT SYSTEM (SMOOTH TRANSITIONS)
 # ============================================
 
 @dp.callback_query(F.data == "menu_deposit")
@@ -1306,34 +1307,100 @@ async def process_admin_unban_user(message: Message, state: FSMContext):
         await message.answer(f'<tg-emoji emoji-id="5274099962655816924">❌</tg-emoji> Error: {e}', reply_markup=get_admin_menu_keyboard())
     await state.clear()
 
+# --- DYNAMIC BROADCAST SYSTEM WITH ACTION BUTTON CHOICES ---
 @dp.message(F.text == "📢 Broadcast", StateFilter("*"))
 async def admin_broadcast_prompt(message: Message, state: FSMContext):
     if message.from_user.id != ADMIN_ID:
         return
     await state.set_state(AdminState.waiting_for_broadcast)
-    await message.answer('<tg-emoji emoji-id="5206607081334906820">📢</tg-emoji> Send or forward the message you want to broadcast to all users:', parse_mode=ParseMode.HTML)
+    await message.answer('<tg-emoji emoji-id="5206607081334906820">📢</tg-emoji> <b>Step 1/2:</b> Send or forward the broadcast message (Text or Photo):', parse_mode=ParseMode.HTML)
 
 @dp.message(AdminState.waiting_for_broadcast, ~F.text.in_(MENU_BUTTONS))
-async def process_admin_broadcast(message: Message, state: FSMContext):
+async def process_broadcast_message_received(message: Message, state: FSMContext):
+    if message.photo:
+        await state.update_data(
+            broadcast_type="photo",
+            broadcast_photo=message.photo[-1].file_id,
+            broadcast_caption=message.caption or ""
+        )
+    else:
+        await state.update_data(
+            broadcast_type="text",
+            broadcast_text=message.text
+        )
+
+    await state.set_state(AdminState.waiting_for_broadcast_button)
+
+    kb = InlineKeyboardBuilder()
+    kb.button(text="Deposit Funds", callback_data="bc_btn:deposit", icon_custom_emoji_id="5445353829304387411", style="primary")
+    kb.button(text="Buy Gmail", callback_data="bc_btn:buy", icon_custom_emoji_id="5377548235709619284", style="success")
+    kb.button(text="Skip (No Button)", callback_data="bc_btn:skip", icon_custom_emoji_id="5352759161945867747")
+    kb.adjust(2, 1)
+
+    await message.answer(
+        "🔘 <b>Step 2/2: Choose an Action Button to attach:</b>\n\n"
+        "Users can tap this button directly from the broadcast to jump straight into the feature.",
+        parse_mode=ParseMode.HTML,
+        reply_markup=kb.as_markup()
+    )
+
+@dp.callback_query(AdminState.waiting_for_broadcast_button, F.data.startswith("bc_btn:"))
+async def process_broadcast_execution(call: CallbackQuery, state: FSMContext):
+    await call.answer()
+    choice = call.data.split(":")[1]
+    data = await state.get_data()
+
+    # Build target user inline button
+    user_markup = None
+    if choice == "deposit":
+        kb = InlineKeyboardBuilder()
+        kb.button(text="Deposit Funds", callback_data="menu_deposit", icon_custom_emoji_id="5445353829304387411", style="primary")
+        user_markup = kb.as_markup()
+    elif choice == "buy":
+        kb = InlineKeyboardBuilder()
+        kb.button(text="Buy Gmail", callback_data="menu_buy", icon_custom_emoji_id="5377548235709619284", style="success")
+        user_markup = kb.as_markup()
+
     async with db_pool.acquire() as conn:
         users = await conn.fetch("SELECT user_id FROM users")
 
     if not users:
-        await message.answer("📭 No users found.", reply_markup=get_admin_menu_keyboard())
+        await call.message.answer("📭 No users found in database to broadcast.", reply_markup=get_admin_menu_keyboard())
         await state.clear()
         return
 
-    status_msg = await message.answer(f"⏳ Broadcasting to {len(users)} users...")
+    status_msg = await call.message.answer(f"⏳ <b>Broadcasting to {len(users)} users...</b>", parse_mode=ParseMode.HTML)
     sent, failed = 0, 0
-    for idx, u in enumerate(users, 1):
+
+    for u in users:
+        target_uid = u['user_id']
         try:
-            await bot.copy_message(chat_id=u['user_id'], from_chat_id=message.chat.id, message_id=message.message_id)
+            if data.get("broadcast_type") == "photo":
+                await bot.send_photo(
+                    chat_id=target_uid,
+                    photo=data.get("broadcast_photo"),
+                    caption=data.get("broadcast_caption"),
+                    reply_markup=user_markup,
+                    parse_mode=ParseMode.HTML
+                )
+            else:
+                await bot.send_message(
+                    chat_id=target_uid,
+                    text=data.get("broadcast_text"),
+                    reply_markup=user_markup,
+                    parse_mode=ParseMode.HTML
+                )
             sent += 1
         except Exception:
             failed += 1
         await asyncio.sleep(0.04)
 
-    await status_msg.edit_text(f'<tg-emoji emoji-id="6217663806110175239">✅</tg-emoji> <b>Broadcast Completed!</b>\n\n🟢 Sent: {sent}\n🔴 Failed: {failed}', parse_mode=ParseMode.HTML)
+    await status_msg.edit_text(
+        f'<tg-emoji emoji-id="6217663806110175239">✅</tg-emoji> <b>Broadcast Completed!</b>\n\n'
+        f'🟢 <b>Sent:</b> {sent}\n'
+        f'🔴 <b>Failed:</b> {failed}',
+        parse_mode=ParseMode.HTML
+    )
     await state.clear()
 
 # ============================================
