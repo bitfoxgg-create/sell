@@ -148,16 +148,14 @@ async def init_db():
         await conn.execute("ALTER TABLE deposit_methods ADD COLUMN IF NOT EXISTS custom_emoji_id TEXT DEFAULT NULL")
         await conn.execute("ALTER TABLE deposit_methods ADD COLUMN IF NOT EXISTS qr_file_id TEXT DEFAULT NULL")
 
-        # Populate default deposit methods if empty
-        methods_count = await conn.fetchval("SELECT COUNT(*) FROM deposit_methods")
-        if methods_count == 0:
-            await conn.execute('''
-                INSERT INTO deposit_methods (name, details, custom_emoji_id) VALUES
-                ('Binance ID', '1230141397', '5278467510604160626'),
-                ('USDT (BEP-20)', '0xFbaE715FeFAf06fdD6b203a769685DD25C18678C', '5201692367437974073'),
-                ('UPI (India)', 'adarsh--hacker@fam', '6291696801636424911')
-                ON CONFLICT (name) DO NOTHING
-            ''')
+        # Populate or update default deposit methods with correct custom emoji IDs
+        await conn.execute('''
+            INSERT INTO deposit_methods (name, details, custom_emoji_id) VALUES
+            ('Binance ID', '1230141397', '5278467510604160626'),
+            ('USDT (BEP-20)', '0xFbaE715FeFAf06fdD6b203a769685DD25C18678C', '5201692367437974073'),
+            ('UPI (India)', 'adarsh--hacker@fam', '6291696801636424911')
+            ON CONFLICT (name) DO UPDATE SET custom_emoji_id = EXCLUDED.custom_emoji_id
+        ''')
 
         # Inventory Table (Stock)
         await conn.execute('''
@@ -471,10 +469,13 @@ async def cb_menu_back(call: CallbackQuery, state: FSMContext):
         f'Choose an option below to proceed:'
     )
     try:
-        await call.message.delete()
+        if call.message.photo:
+            await call.message.delete()
+            await call.message.answer(text, parse_mode=ParseMode.HTML, reply_markup=get_main_menu_keyboard())
+        else:
+            await call.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=get_main_menu_keyboard())
     except Exception:
-        pass
-    await call.message.answer(text, parse_mode=ParseMode.HTML, reply_markup=get_main_menu_keyboard())
+        await call.message.answer(text, parse_mode=ParseMode.HTML, reply_markup=get_main_menu_keyboard())
 
 @dp.callback_query(F.data == "menu_balance")
 async def cb_balance(call: CallbackQuery):
@@ -640,7 +641,11 @@ async def cb_deposit_menu(call: CallbackQuery, state: FSMContext):
         f'Select your preferred payment method below to view details and deposit funds:'
     )
     try:
-        await call.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
+        if call.message.photo:
+            await call.message.delete()
+            await call.message.answer(text, parse_mode=ParseMode.HTML, reply_markup=markup)
+        else:
+            await call.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
     except Exception:
         await call.message.answer(text, parse_mode=ParseMode.HTML, reply_markup=markup)
 
@@ -675,15 +680,17 @@ async def cb_select_dynamic_deposit_method(call: CallbackQuery, state: FSMContex
     kb.button(text="Cancel", callback_data="menu_back", icon_custom_emoji_id="5352759161945867747")
     kb.adjust(1)
 
-    try:
-        await call.message.delete()
-    except Exception:
-        pass
-
     if qr_file_id:
+        try:
+            await call.message.delete()
+        except Exception:
+            pass
         await call.message.answer_photo(photo=qr_file_id, caption=text, parse_mode=ParseMode.HTML, reply_markup=kb.as_markup())
     else:
-        await call.message.answer(text, parse_mode=ParseMode.HTML, reply_markup=kb.as_markup())
+        try:
+            await call.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=kb.as_markup())
+        except Exception:
+            await call.message.answer(text, parse_mode=ParseMode.HTML, reply_markup=kb.as_markup())
 
 @dp.message(UserState.deposit_amount, F.text, ~F.text.startswith("/"))
 async def process_deposit_amount(message: Message, state: FSMContext):
