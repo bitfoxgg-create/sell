@@ -2,6 +2,7 @@ import asyncio
 from datetime import datetime, timedelta
 import os
 from threading import Thread
+import time
 from flask import Flask
 
 import asyncpg
@@ -38,6 +39,7 @@ USD_TO_INR = 96.30
 BOT_STATUS = True
 MUST_JOIN_CHANNEL = None
 BANNED_USERS_CACHE = set()
+JOINED_CACHE = {}
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
@@ -147,7 +149,7 @@ async def init_db():
         await conn.execute("ALTER TABLE deposit_methods ADD COLUMN IF NOT EXISTS custom_emoji_id TEXT DEFAULT NULL")
         await conn.execute("ALTER TABLE deposit_methods ADD COLUMN IF NOT EXISTS qr_file_id TEXT DEFAULT NULL")
 
-        # Default deposit methods with verified custom emoji IDs
+        # Default deposit methods
         await conn.execute('''
             INSERT INTO deposit_methods (name, details, custom_emoji_id) VALUES
             ('Binance ID', '1230141397', '5278467510604160626'),
@@ -245,7 +247,7 @@ async def load_settings_and_cache():
             WARRANTY_DAYS = int(w_days)
 
 # ============================================
-# HELPERS & CREDENTIAL FORMATTER
+# HELPERS & MUST-JOIN SYSTEM
 # ============================================
 
 async def ensure_user(user_id: int, username: str = None):
@@ -289,6 +291,41 @@ def format_account_credentials(raw_creds: str) -> str:
         )
     return f"📋 <b>Account:</b> <code>{raw_creds}</code>"
 
+async def check_user_joined_channel(user_id: int) -> bool:
+    if not MUST_JOIN_CHANNEL:
+        return True
+    now = time.time()
+    if user_id in JOINED_CACHE and (now - JOINED_CACHE[user_id]) < 600:
+        return True
+    try:
+        member = await bot.get_chat_member(chat_id=MUST_JOIN_CHANNEL, user_id=user_id)
+        is_joined = member.status in ['creator', 'administrator', 'member']
+        if is_joined:
+            JOINED_CACHE[user_id] = now
+        else:
+            JOINED_CACHE.pop(user_id, None)
+        return is_joined
+    except Exception as e:
+        print(f"Error checking channel membership: {e}")
+        return True
+
+def get_must_join_keyboard():
+    channel_url = f"https://t.me/{MUST_JOIN_CHANNEL.replace('@', '')}" if MUST_JOIN_CHANNEL.startswith("@") else "https://t.me/"
+    kb = InlineKeyboardBuilder()
+    kb.button(text="📢 Join Official Channel", url=channel_url)
+    kb.button(
+        text="Joined / Verify", 
+        callback_data="check_must_join",
+        icon_custom_emoji_id="6217663806110175239",
+        style="success"
+    )
+    kb.adjust(1, 1)
+    return kb.as_markup()
+
+# ============================================
+# MIDDLEWARES
+# ============================================
+
 @dp.message.outer_middleware()
 async def global_message_middleware(handler, event: Message, data):
     if not event.from_user:
@@ -302,7 +339,64 @@ async def global_message_middleware(handler, event: Message, data):
     if user_id in BANNED_USERS_CACHE:
         await event.answer('<tg-emoji emoji-id="5274099962655816924">🚫</tg-emoji> You are banned from using this bot.')
         return
+    if MUST_JOIN_CHANNEL and not await check_user_joined_channel(user_id):
+        await event.answer(
+            f'<tg-emoji emoji-id="5274099962655816924">❗️</tg-emoji> <b>You must join our official channel to use this bot!</b>\n\n'
+            f'Please join the channel below and click <b>Joined / Verify</b>.',
+            parse_mode=ParseMode.HTML,
+            reply_markup=get_must_join_keyboard()
+        )
+        return
     return await handler(event, data)
+
+@dp.callback_query.outer_middleware()
+async def global_callback_middleware(handler, event: CallbackQuery, data):
+    if not event.from_user:
+        return await handler(event, data)
+    user_id = event.from_user.id
+    if user_id == ADMIN_ID:
+        return await handler(event, data)
+    if not BOT_STATUS:
+        try:
+            await event.answer("⚠️ Bot is currently off. Please wait for admin to enable it.", show_alert=True)
+        except Exception:
+            pass
+        return
+    if user_id in BANNED_USERS_CACHE:
+        try:
+            await event.answer("🚫 You are banned from using this bot.", show_alert=True)
+        except Exception:
+            pass
+        return
+    if event.data == "check_must_join":
+        return await handler(event, data)
+    if MUST_JOIN_CHANNEL and not await check_user_joined_channel(user_id):
+        try:
+            await event.answer("⚠️ You must join our channel first to use the bot!", show_alert=True)
+        except Exception:
+            pass
+        return
+    return await handler(event, data)
+
+@dp.callback_query(F.data == "check_must_join")
+async def verify_must_join_callback(call: CallbackQuery):
+    await call.answer()
+    user_id = call.from_user.id
+    if await check_user_joined_channel(user_id):
+        try:
+            await call.message.delete()
+        except Exception:
+            pass
+        await call.message.answer(
+            f'<tg-emoji emoji-id="6217663806110175239">✅</tg-emoji> <b>Verification successful! Welcome to the Store.</b>',
+            parse_mode=ParseMode.HTML,
+            reply_markup=get_main_menu_keyboard()
+        )
+    else:
+        try:
+            await call.answer("❌ You haven't joined the channel yet! Please join and try again.", show_alert=True)
+        except Exception:
+            pass
 
 # ============================================
 # PAGINATED TRANSACTION RENDERER
@@ -528,7 +622,6 @@ async def process_purchase(call: CallbackQuery):
 
     bal = await get_user_balance(user_id)
     if bal < price:
-        # Native Pop-up Alert
         await call.answer(
             f"⚠️ Insufficient Balance!\n\n"
             f"Required: ${price:.2f}\n"
@@ -703,7 +796,6 @@ async def cb_select_dynamic_deposit_method(call: CallbackQuery, state: FSMContex
     kb.button(text="Cancel", callback_data="menu_back", icon_custom_emoji_id="5352759161945867747")
     kb.adjust(1)
 
-    # Smooth handling: only delete/send if switching to an image; otherwise edit smoothly in-place
     if qr_file_id:
         try:
             await call.message.delete()
@@ -897,6 +989,46 @@ async def open_admin_panel(message: Message, state: FSMContext):
         return
     await state.clear()
     await message.answer('<tg-emoji emoji-id="5893161718179173515">🛠</tg-emoji> <b>Store Admin Control Panel</b>\n\nChoose an action below:', parse_mode=ParseMode.HTML, reply_markup=get_admin_menu_keyboard())
+
+# --- MUST JOIN CHANNEL SETTING HANDLER ---
+@dp.message(F.text == "📢 Must Join Channel", StateFilter("*"))
+async def admin_btn_must_join_channel(message: Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID:
+        return
+    await state.set_state(AdminState.waiting_for_channel_link)
+    current = MUST_JOIN_CHANNEL if MUST_JOIN_CHANNEL else "Disabled"
+    await message.answer(
+        f"📢 <b>Must Join Channel Settings</b>\n\n"
+        f"Currently set to: <code>{current}</code>\n\n"
+        f"Send the channel username (e.g. <code>@MyChannel</code>) or link (e.g. <code>https://t.me/MyChannel</code>).\n\n"
+        f"<i>Type <code>none</code> to disable forced channel joining.</i>",
+        parse_mode=ParseMode.HTML
+    )
+
+@dp.message(AdminState.waiting_for_channel_link, ~F.text.in_(MENU_BUTTONS))
+async def process_must_join_channel_step(message: Message, state: FSMContext):
+    global MUST_JOIN_CHANNEL
+    val = message.text.strip()
+
+    if val.lower() == "none":
+        MUST_JOIN_CHANNEL = None
+        db_val = "off"
+        msg = "✅ <b>Forced channel join disabled.</b>"
+    else:
+        if "/" in val:
+            val = "@" + val.split("/")[-1].replace("@", "")
+        elif not val.startswith("@"):
+            val = "@" + val
+
+        MUST_JOIN_CHANNEL = val
+        db_val = val
+        msg = f"✅ <b>Must join channel updated to:</b> <code>{val}</code>"
+
+    async with db_pool.acquire() as conn:
+        await conn.execute("INSERT INTO bot_settings (key, value) VALUES ('must_join_channel', $1) ON CONFLICT (key) DO UPDATE SET value = $1", db_val)
+
+    await message.answer(msg, parse_mode=ParseMode.HTML, reply_markup=get_admin_menu_keyboard())
+    await state.clear()
 
 # --- TRANSACTIONS HANDLER ---
 @dp.message(F.text == "💳 Transactions", StateFilter("*"))
