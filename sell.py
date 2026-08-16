@@ -6,7 +6,6 @@ from flask import Flask
 
 import asyncpg
 from aiogram import Bot, Dispatcher, F
-from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.enums import ParseMode
 from aiogram.filters import Command, CommandStart, StateFilter
 from aiogram.fsm.context import FSMContext
@@ -40,9 +39,7 @@ BOT_STATUS = True
 MUST_JOIN_CHANNEL = None
 BANNED_USERS_CACHE = set()
 
-# High-Performance Bot Session Initializer
-session = AiohttpSession()
-bot = Bot(token=BOT_TOKEN, session=session)
+bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 db_pool = None
 
@@ -92,7 +89,6 @@ class AdminState(StatesGroup):
     waiting_for_new_price = State()
     waiting_for_old_price = State()
     waiting_for_warranty_days = State()
-    # Dynamic Deposit Management States
     waiting_for_new_method_name = State()
     waiting_for_new_method_emoji = State()
     waiting_for_new_method_details = State()
@@ -103,7 +99,7 @@ class AdminState(StatesGroup):
     waiting_for_edit_method_qr = State()
 
 # ============================================
-# DATABASE INITIALIZATION & CACHE OPTIMIZATIONS
+# DATABASE INITIALIZATION & CACHE
 # ============================================
 
 async def init_db():
@@ -115,15 +111,12 @@ async def init_db():
     if url.startswith("postgres://"):
         url = url.replace("postgres://", "postgresql://", 1)
         
-    # High-Performance Pool Settings
     db_pool = await asyncpg.create_pool(
         dsn=url, 
         ssl='require', 
-        min_size=5, 
-        max_size=20,
-        timeout=10.0,
-        command_timeout=10.0,
-        statement_cache_size=100
+        min_size=3, 
+        max_size=15,
+        statement_cache_size=0
     )
     
     async with db_pool.acquire() as conn:
@@ -154,7 +147,7 @@ async def init_db():
         await conn.execute("ALTER TABLE deposit_methods ADD COLUMN IF NOT EXISTS custom_emoji_id TEXT DEFAULT NULL")
         await conn.execute("ALTER TABLE deposit_methods ADD COLUMN IF NOT EXISTS qr_file_id TEXT DEFAULT NULL")
 
-        # Populate or update default deposit methods
+        # Default deposit methods with verified custom emoji IDs
         await conn.execute('''
             INSERT INTO deposit_methods (name, details, custom_emoji_id) VALUES
             ('Binance ID', '1230141397', '5278467510604160626'),
@@ -225,12 +218,6 @@ async def init_db():
                 value TEXT
             )
         ''')
-
-        # High-Speed SQL Indexes
-        await conn.execute("CREATE INDEX IF NOT EXISTS idx_inventory_status ON inventory(account_type, status)")
-        await conn.execute("CREATE INDEX IF NOT EXISTS idx_orders_user_id ON orders(user_id)")
-        await conn.execute("CREATE INDEX IF NOT EXISTS idx_transactions_user_id ON transactions(user_id)")
-        await conn.execute("CREATE INDEX IF NOT EXISTS idx_deposits_status ON deposits(status)")
 
 async def load_settings_and_cache():
     global BANNED_USERS_CACHE, MUST_JOIN_CHANNEL, BOT_STATUS, PRICE_NEW_GMAIL, PRICE_OLD_GMAIL, WARRANTY_DAYS
@@ -505,7 +492,11 @@ async def cb_balance(call: CallbackQuery):
     kb.button(text="Back", callback_data="menu_back", icon_custom_emoji_id="5352759161945867747")
     kb.adjust(1)
     try:
-        await call.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=kb.as_markup())
+        if call.message.photo:
+            await call.message.delete()
+            await call.message.answer(text, parse_mode=ParseMode.HTML, reply_markup=kb.as_markup())
+        else:
+            await call.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=kb.as_markup())
     except Exception:
         await call.message.answer(text, parse_mode=ParseMode.HTML, reply_markup=kb.as_markup())
 
@@ -520,13 +511,16 @@ async def cb_buy_menu(call: CallbackQuery):
         f'<tg-emoji emoji-id="5262831879731555779">🛡</tg-emoji> <i>Every purchase is covered by an automated {WARRANTY_DAYS}-day warranty.</i>'
     )
     try:
-        await call.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=get_buy_keyboard(new_stock, old_stock))
+        if call.message.photo:
+            await call.message.delete()
+            await call.message.answer(text, parse_mode=ParseMode.HTML, reply_markup=get_buy_keyboard(new_stock, old_stock))
+        else:
+            await call.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=get_buy_keyboard(new_stock, old_stock))
     except Exception:
         await call.message.answer(text, parse_mode=ParseMode.HTML, reply_markup=get_buy_keyboard(new_stock, old_stock))
 
 @dp.callback_query(F.data.in_({"buy_new", "buy_old"}))
 async def process_purchase(call: CallbackQuery):
-    await call.answer()
     acc_type = "new" if call.data == "buy_new" else "old"
     price = PRICE_NEW_GMAIL if acc_type == "new" else PRICE_OLD_GMAIL
     user_id = call.from_user.id
@@ -534,8 +528,17 @@ async def process_purchase(call: CallbackQuery):
 
     bal = await get_user_balance(user_id)
     if bal < price:
-        await call.answer(f"❌ Insufficient balance! Required: ${price:.2f}, Balance: ${bal:.2f}", show_alert=True)
+        # Native Pop-up Alert
+        await call.answer(
+            f"⚠️ Insufficient Balance!\n\n"
+            f"Required: ${price:.2f}\n"
+            f"Your Balance: ${bal:.2f}\n\n"
+            f"Please deposit funds from the Main Menu to continue.",
+            show_alert=True
+        )
         return
+
+    await call.answer()
 
     async with db_pool.acquire() as conn:
         async with conn.transaction():
@@ -612,7 +615,11 @@ async def cb_view_orders(call: CallbackQuery):
     kb = InlineKeyboardBuilder()
     kb.button(text="Back", callback_data="menu_back", icon_custom_emoji_id="5352759161945867747")
     try:
-        await call.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=kb.as_markup())
+        if call.message.photo:
+            await call.message.delete()
+            await call.message.answer(text, parse_mode=ParseMode.HTML, reply_markup=kb.as_markup())
+        else:
+            await call.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=kb.as_markup())
     except Exception:
         await call.message.answer(text, parse_mode=ParseMode.HTML, reply_markup=kb.as_markup())
 
@@ -621,7 +628,11 @@ async def cb_history(call: CallbackQuery):
     await call.answer()
     text, markup = await render_transaction_history_page(call.from_user.id, page=1, is_admin=False)
     try:
-        await call.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
+        if call.message.photo:
+            await call.message.delete()
+            await call.message.answer(text, parse_mode=ParseMode.HTML, reply_markup=markup)
+        else:
+            await call.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
     except Exception:
         await call.message.answer(text, parse_mode=ParseMode.HTML, reply_markup=markup)
 
@@ -640,7 +651,7 @@ async def cb_noop(call: CallbackQuery):
     await call.answer()
 
 # ============================================
-# DYNAMIC USER DEPOSIT SYSTEM (WITH QR/IMAGE)
+# DYNAMIC USER DEPOSIT SYSTEM (SMOOTH TRANSITIONS)
 # ============================================
 
 @dp.callback_query(F.data == "menu_deposit")
@@ -692,6 +703,7 @@ async def cb_select_dynamic_deposit_method(call: CallbackQuery, state: FSMContex
     kb.button(text="Cancel", callback_data="menu_back", icon_custom_emoji_id="5352759161945867747")
     kb.adjust(1)
 
+    # Smooth handling: only delete/send if switching to an image; otherwise edit smoothly in-place
     if qr_file_id:
         try:
             await call.message.delete()
@@ -830,7 +842,11 @@ async def cb_support(call: CallbackQuery, state: FSMContext):
     kb = InlineKeyboardBuilder()
     kb.button(text="Cancel", callback_data="menu_back", icon_custom_emoji_id="5352759161945867747")
     try:
-        await call.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=kb.as_markup())
+        if call.message.photo:
+            await call.message.delete()
+            await call.message.answer(text, parse_mode=ParseMode.HTML, reply_markup=kb.as_markup())
+        else:
+            await call.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=kb.as_markup())
     except Exception:
         await call.message.answer(text, parse_mode=ParseMode.HTML, reply_markup=kb.as_markup())
 
@@ -1517,7 +1533,7 @@ async def return_to_main_menu(message: Message, state: FSMContext):
     await message.answer("🏠 Returned to User Main Menu.", reply_markup=get_main_menu_keyboard())
 
 # ============================================
-# HIGH-PERFORMANCE POLLING RUNNER
+# RUNNER
 # ============================================
 
 async def main():
@@ -1528,13 +1544,8 @@ async def main():
     server_thread.daemon = True
     server_thread.start()
     
-    print("🤖 Gmail Store Bot running optimized 24/7 on Render...")
-    # Skip pending updates and restrict listeners for faster response processing
-    await dp.start_polling(
-        bot,
-        allowed_updates=["message", "callback_query"],
-        drop_pending_updates=True
-    )
+    print("🤖 Gmail Store Bot running 24/7 on Render...")
+    await dp.start_polling(bot)
 
 if __name__ == '__main__':
     asyncio.run(main())
