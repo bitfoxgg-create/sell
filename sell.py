@@ -235,7 +235,7 @@ async def load_settings_and_cache():
             UPI_ID = upi_val
 
 # ============================================
-# HELPERS & MIDDLEWARES
+# HELPERS & CREDENTIAL FORMATTER
 # ============================================
 
 async def ensure_user(user_id: int, username: str = None):
@@ -256,6 +256,28 @@ async def get_stock_counts():
         new_count = await conn.fetchval("SELECT COUNT(*) FROM inventory WHERE account_type='new' AND status='available'") or 0
         old_count = await conn.fetchval("SELECT COUNT(*) FROM inventory WHERE account_type='old' AND status='available'") or 0
     return new_count, old_count
+
+def format_account_credentials(raw_creds: str) -> str:
+    """Parses raw text (supports ':', '|', or space) into a clear display format."""
+    if ":" in raw_creds:
+        parts = [p.strip() for p in raw_creds.split(":")]
+    elif "|" in raw_creds:
+        parts = [p.strip() for p in raw_creds.split("|")]
+    else:
+        parts = [p.strip() for p in raw_creds.split()]
+
+    if len(parts) >= 3:
+        return (
+            f"📧 <b>Email:</b> <code>{parts[0]}</code>\n"
+            f"<tg-emoji emoji-id=\"6005570495603282482\">🔑</tg-emoji> <b>Password:</b> <code>{parts[1]}</code>\n"
+            f"🔄 <b>Recovery Email:</b> <code>{parts[2]}</code>"
+        )
+    elif len(parts) == 2:
+        return (
+            f"📧 <b>Email:</b> <code>{parts[0]}</code>\n"
+            f"<tg-emoji emoji-id=\"6005570495603282482\">🔑</tg-emoji> <b>Password:</b> <code>{parts[1]}</code>"
+        )
+    return f"📋 <b>Account:</b> <code>{raw_creds}</code>"
 
 @dp.message.outer_middleware()
 async def global_message_middleware(handler, event: Message, data):
@@ -346,7 +368,7 @@ def get_main_menu_keyboard():
     kb.button(text="Buy Gmail", callback_data="menu_buy", icon_custom_emoji_id="5377548235709619284", style="success")
     kb.button(text="Deposit Funds", callback_data="menu_deposit", icon_custom_emoji_id="5445353829304387411", style="primary")
     kb.button(text="Balance", callback_data="menu_balance", icon_custom_emoji_id="5417924076503062111", style="primary")
-    kb.button(text="My Orders & Warranty", callback_data="menu_orders", icon_custom_emoji_id="5445221832074483553", style="primary")
+    kb.button(text="My Orders & Warranty", callback_data="menu_orders", icon_custom_emoji_id="5262831879731555779", style="primary")
     kb.button(text="History", callback_data="menu_history", icon_custom_emoji_id="5440410042773824003", style="primary")
     kb.button(text="Support", callback_data="menu_support", icon_custom_emoji_id="5274099962655816924", style="danger")
     kb.adjust(2, 2, 2)
@@ -354,8 +376,8 @@ def get_main_menu_keyboard():
 
 def get_buy_keyboard(new_stock: int, old_stock: int):
     kb = InlineKeyboardBuilder()
-    kb.button(text=f"New Gmail (${PRICE_NEW_GMAIL:.2f}) [Stock: {new_stock}]", callback_data="buy_new", icon_custom_emoji_id="5870458774455587120", style="success")
-    kb.button(text=f"Old Gmail (${PRICE_OLD_GMAIL:.2f}) [Stock: {old_stock}]", callback_data="buy_old", icon_custom_emoji_id="5206607081334906820", style="primary")
+    kb.button(text=f"New Gmail (${PRICE_NEW_GMAIL:.2f}) [Stock: {new_stock}]", callback_data="buy_new", icon_custom_emoji_id="5253742260054409879", style="success")
+    kb.button(text=f"Old Gmail (${PRICE_OLD_GMAIL:.2f}) [Stock: {old_stock}]", callback_data="buy_old", icon_custom_emoji_id="5008025248314950702", style="primary")
     kb.button(text="Back", callback_data="menu_back", icon_custom_emoji_id="5352759161945867747")
     kb.adjust(1)
     return kb.as_markup()
@@ -371,9 +393,9 @@ def get_deposit_methods_keyboard():
 
 def get_change_values_inline_keyboard():
     kb = InlineKeyboardBuilder()
-    kb.button(text="New Gmail Price", callback_data="ch_val:new_price", icon_custom_emoji_id="5417924076503062111", style="primary")
-    kb.button(text="Old Gmail Price", callback_data="ch_val:old_price", icon_custom_emoji_id="5417924076503062111", style="primary")
-    kb.button(text="Warranty Days", callback_data="ch_val:warranty", icon_custom_emoji_id="5251203410396458957", style="primary")
+    kb.button(text="New Gmail Price", callback_data="ch_val:new_price", icon_custom_emoji_id="5253742260054409879", style="primary")
+    kb.button(text="Old Gmail Price", callback_data="ch_val:old_price", icon_custom_emoji_id="5008025248314950702", style="primary")
+    kb.button(text="Warranty Days", callback_data="ch_val:warranty", icon_custom_emoji_id="5262831879731555779", style="primary")
     kb.button(text="Binance Pay ID", callback_data="ch_val:binance_id", icon_custom_emoji_id="6005570495603282482", style="primary")
     kb.button(text="USDT BEP-20 Address", callback_data="ch_val:usdt_addr", icon_custom_emoji_id="5197434882321567830", style="primary")
     kb.button(text="UPI ID", callback_data="ch_val:upi_id", icon_custom_emoji_id="6278557702109013266", style="primary")
@@ -414,9 +436,9 @@ async def cmd_start(message: Message, state: FSMContext):
     text = (
         f'<tg-emoji emoji-id="5458904472598095631">👋</tg-emoji> <b>Welcome to Gmail Store!</b>\n\n'
         f'<tg-emoji emoji-id="5195033767969839232">⚡</tg-emoji> <b>Pricing & Stock:</b>\n'
-        f'• <b>New Gmail:</b> ${PRICE_NEW_GMAIL:.2f} / account\n'
-        f'• <b>Old Gmail:</b> ${PRICE_OLD_GMAIL:.2f} / account\n'
-        f'<tg-emoji emoji-id="5251203410396458957">🛡</tg-emoji> <b>Warranty:</b> {WARRANTY_DAYS} Days replacement guarantee.\n\n'
+        f'• <tg-emoji emoji-id="5253742260054409879">🆕</tg-emoji> <b>New Gmail:</b> ${PRICE_NEW_GMAIL:.2f} / account\n'
+        f'• <tg-emoji emoji-id="5008025248314950702">🏛</tg-emoji> <b>Old Gmail:</b> ${PRICE_OLD_GMAIL:.2f} / account\n'
+        f'<tg-emoji emoji-id="5262831879731555779">🛡</tg-emoji> <b>Warranty:</b> {WARRANTY_DAYS} Days replacement guarantee.\n\n'
         f'Choose an option below to proceed:'
     )
     await message.answer(text, parse_mode=ParseMode.HTML, reply_markup=get_main_menu_keyboard())
@@ -428,9 +450,9 @@ async def cb_menu_back(call: CallbackQuery, state: FSMContext):
     text = (
         f'<tg-emoji emoji-id="5458904472598095631">👋</tg-emoji> <b>Welcome to Gmail Store!</b>\n\n'
         f'<tg-emoji emoji-id="5195033767969839232">⚡</tg-emoji> <b>Available Products:</b>\n'
-        f'• <b>New Gmail:</b> ${PRICE_NEW_GMAIL:.2f}\n'
-        f'• <b>Old Gmail:</b> ${PRICE_OLD_GMAIL:.2f}\n'
-        f'<tg-emoji emoji-id="5251203410396458957">🛡</tg-emoji> <b>Warranty:</b> {WARRANTY_DAYS} Days Replacement\n\n'
+        f'• <tg-emoji emoji-id="5253742260054409879">🆕</tg-emoji> <b>New Gmail:</b> ${PRICE_NEW_GMAIL:.2f}\n'
+        f'• <tg-emoji emoji-id="5008025248314950702">🏛</tg-emoji> <b>Old Gmail:</b> ${PRICE_OLD_GMAIL:.2f}\n'
+        f'<tg-emoji emoji-id="5262831879731555779">🛡</tg-emoji> <b>Warranty:</b> {WARRANTY_DAYS} Days Replacement\n\n'
         f'Choose an option below to proceed:'
     )
     await call.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=get_main_menu_keyboard())
@@ -458,9 +480,9 @@ async def cb_buy_menu(call: CallbackQuery):
     new_stock, old_stock = await get_stock_counts()
     text = (
         f'<tg-emoji emoji-id="5377548235709619284">🛒</tg-emoji> <b>Choose Gmail Category:</b>\n\n'
-        f'<tg-emoji emoji-id="5870458774455587120">1️⃣</tg-emoji> <b>New Gmail:</b> ${PRICE_NEW_GMAIL:.2f} (Stock: {new_stock})\n'
-        f'<tg-emoji emoji-id="5206607081334906820">2️⃣</tg-emoji> <b>Old Gmail:</b> ${PRICE_OLD_GMAIL:.2f} (Stock: {old_stock})\n\n'
-        f'<tg-emoji emoji-id="5251203410396458957">🛡</tg-emoji> <i>Every purchase is covered by an automated {WARRANTY_DAYS}-day warranty.</i>'
+        f'<tg-emoji emoji-id="5253742260054409879">🆕</tg-emoji> <b>New Gmail:</b> ${PRICE_NEW_GMAIL:.2f} (Stock: {new_stock})\n'
+        f'<tg-emoji emoji-id="5008025248314950702">🏛</tg-emoji> <b>Old Gmail:</b> ${PRICE_OLD_GMAIL:.2f} (Stock: {old_stock})\n\n'
+        f'<tg-emoji emoji-id="5262831879731555779">🛡</tg-emoji> <i>Every purchase is covered by an automated {WARRANTY_DAYS}-day warranty.</i>'
     )
     await call.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=get_buy_keyboard(new_stock, old_stock))
 
@@ -470,6 +492,7 @@ async def process_purchase(call: CallbackQuery):
     acc_type = "new" if call.data == "buy_new" else "old"
     price = PRICE_NEW_GMAIL if acc_type == "new" else PRICE_OLD_GMAIL
     user_id = call.from_user.id
+    type_emoji = '<tg-emoji emoji-id="5253742260054409879">🆕</tg-emoji>' if acc_type == "new" else '<tg-emoji emoji-id="5008025248314950702">🏛</tg-emoji>'
 
     bal = await get_user_balance(user_id)
     if bal < price:
@@ -498,13 +521,15 @@ async def process_purchase(call: CallbackQuery):
                 VALUES ($1, 'purchase', $2, $3)
             ''', user_id, -price, f"Purchased {acc_type.upper()} Gmail #{order_id}")
 
+    formatted_creds = format_account_credentials(item['credentials'])
+
     text = (
         f'<tg-emoji emoji-id="6217663806110175239">🎉</tg-emoji> <b>Purchase Successful! Order #{order_id}</b>\n\n'
-        f'<tg-emoji emoji-id="5445221832074483553">📦</tg-emoji> <b>Type:</b> {acc_type.upper()} Gmail\n'
+        f'{type_emoji} <b>Type:</b> {acc_type.upper()} Gmail\n'
         f'<tg-emoji emoji-id="5417924076503062111">💵</tg-emoji> <b>Price:</b> ${price:.2f}\n'
-        f'<tg-emoji emoji-id="5251203410396458957">🛡</tg-emoji> <b>Warranty Active Until:</b> {warranty_date.strftime("%Y-%m-%d %H:%M:%S UTC")} ({WARRANTY_DAYS} Days)\n\n'
-        f'<tg-emoji emoji-id="6005570495603282482">🔑</tg-emoji> <b>Account Credentials:</b>\n'
-        f'<code>{item["credentials"]}</code>\n\n'
+        f'<tg-emoji emoji-id="5262831879731555779">🛡</tg-emoji> <b>Warranty Active Until:</b> {warranty_date.strftime("%Y-%m-%d %H:%M:%S UTC")} ({WARRANTY_DAYS} Days)\n\n'
+        f'🔐 <b>Account Credentials:</b>\n'
+        f'{formatted_creds}\n\n'
         f'<i>Please secure this account. Contact support if there are any login issues during your warranty period.</i>'
     )
     kb = InlineKeyboardBuilder()
@@ -532,11 +557,14 @@ async def cb_view_orders(call: CallbackQuery):
             else:
                 warranty_status = '<tg-emoji emoji-id="5274099962655816924">🔴</tg-emoji> Expired'
 
+            type_emoji = '<tg-emoji emoji-id="5253742260054409879">🆕</tg-emoji>' if r['account_type'] == "new" else '<tg-emoji emoji-id="5008025248314950702">🏛</tg-emoji>'
+            formatted_creds = format_account_credentials(r['credentials'])
+
             text += (
-                f'<tg-emoji emoji-id="5197269100878907942">🆔</tg-emoji> <b>Order #{r["id"]}</b> ({r["account_type"].upper()})\n'
-                f'<tg-emoji emoji-id="6005570495603282482">🔑</tg-emoji> <code>{r["credentials"]}</code>\n'
-                f'🛡 Warranty: {warranty_status}\n'
-                f'📅 Date: {r["created_at"].strftime("%b %d, %Y")}\n'
+                f'<tg-emoji emoji-id="5197269100878907942">🆔</tg-emoji> <b>Order #{r["id"]}</b> ({type_emoji} {r["account_type"].upper()})\n'
+                f'{formatted_creds}\n'
+                f'<tg-emoji emoji-id="5262831879731555779">🛡</tg-emoji> <b>Warranty:</b> {warranty_status}\n'
+                f'📅 <b>Date:</b> {r["created_at"].strftime("%b %d, %Y")}\n'
                 f'━━━━━━━━━━━━━━━━━━\n'
             )
 
@@ -777,7 +805,7 @@ async def open_admin_panel(message: Message, state: FSMContext):
     await state.clear()
     await message.answer('<tg-emoji emoji-id="5893161718179173515">🛠</tg-emoji> <b>Store Admin Control Panel</b>\n\nChoose an action below:', parse_mode=ParseMode.HTML, reply_markup=get_admin_menu_keyboard())
 
-# --- TRANSACTIONS HANDLER (FIXED) ---
+# --- TRANSACTIONS HANDLER ---
 @dp.message(F.text == "💳 Transactions", StateFilter("*"))
 async def admin_btn_transactions(message: Message, state: FSMContext):
     if message.from_user.id != ADMIN_ID:
@@ -813,8 +841,8 @@ async def admin_add_stock(message: Message, state: FSMContext):
         return
     await state.clear()
     kb = InlineKeyboardBuilder()
-    kb.button(text="Add NEW Gmails", callback_data="admin_stock_type:new", icon_custom_emoji_id="5870458774455587120", style="success")
-    kb.button(text="Add OLD Gmails", callback_data="admin_stock_type:old", icon_custom_emoji_id="5206607081334906820", style="primary")
+    kb.button(text="Add NEW Gmails", callback_data="admin_stock_type:new", icon_custom_emoji_id="5253742260054409879", style="success")
+    kb.button(text="Add OLD Gmails", callback_data="admin_stock_type:old", icon_custom_emoji_id="5008025248314950702", style="primary")
     kb.adjust(2)
     await message.answer("Select which inventory category you want to add stock to:", reply_markup=kb.as_markup())
 
@@ -822,10 +850,11 @@ async def admin_add_stock(message: Message, state: FSMContext):
 async def cb_admin_stock_type(call: CallbackQuery, state: FSMContext):
     await call.answer()
     acc_type = call.data.split(":")[1]
+    type_emoji = '<tg-emoji emoji-id="5253742260054409879">🆕</tg-emoji>' if acc_type == "new" else '<tg-emoji emoji-id="5008025248314950702">🏛</tg-emoji>'
     await state.update_data(stock_category=acc_type)
     await state.set_state(AdminState.waiting_for_bulk_accounts)
     await call.message.answer(
-        f'<tg-emoji emoji-id="5445221832074483553">📦</tg-emoji> <b>Add Stock for {acc_type.upper()} Gmails</b>\n\n'
+        f'<tg-emoji emoji-id="5445221832074483553">📦</tg-emoji> <b>Add Stock for {type_emoji} {acc_type.upper()} Gmails</b>\n\n'
         f'Send accounts line by line (format: <code>email:password</code> or <code>email:password:recovery</code>):',
         parse_mode=ParseMode.HTML
     )
@@ -857,8 +886,8 @@ async def admin_view_inv(message: Message):
         total_sold = await conn.fetchval("SELECT COUNT(*) FROM orders") or 0
     text = (
         f'<tg-emoji emoji-id="5445221832074483553">📦</tg-emoji> <b>Current Inventory:</b>\n\n'
-        f'<tg-emoji emoji-id="6217663806110175239">🟢</tg-emoji> <b>Available New Gmails:</b> {new_s}\n'
-        f'<tg-emoji emoji-id="6217663806110175239">🟢</tg-emoji> <b>Available Old Gmails:</b> {old_s}\n'
+        f'<tg-emoji emoji-id="5253742260054409879">🆕</tg-emoji> <b>Available New Gmails:</b> {new_s}\n'
+        f'<tg-emoji emoji-id="5008025248314950702">🏛</tg-emoji> <b>Available Old Gmails:</b> {old_s}\n'
         f'<tg-emoji emoji-id="5377548235709619284">🛒</tg-emoji> <b>Total Accounts Sold:</b> {total_sold}'
     )
     await message.answer(text, parse_mode=ParseMode.HTML)
@@ -1054,16 +1083,16 @@ async def process_admin_broadcast(message: Message, state: FSMContext):
     await status_msg.edit_text(f'<tg-emoji emoji-id="6217663806110175239">✅</tg-emoji> <b>Broadcast Completed!</b>\n\n🟢 Sent: {sent}\n🔴 Failed: {failed}', parse_mode=ParseMode.HTML)
     await state.clear()
 
-# --- CHANGE VALUES MENU & ACTIONS (UPDATED) ---
+# --- CHANGE VALUES MENU & ACTIONS ---
 @dp.message(F.text == "⚙️ Change Values", StateFilter("*"))
 async def admin_change_values_menu(message: Message):
     if message.from_user.id != ADMIN_ID:
         return
     text = (
         f'<tg-emoji emoji-id="5893161718179173515">⚙️</tg-emoji> <b>Current System Values & Deposit Info:</b>\n\n'
-        f'• <b>New Gmail Price:</b> ${PRICE_NEW_GMAIL:.2f}\n'
-        f'• <b>Old Gmail Price:</b> ${PRICE_OLD_GMAIL:.2f}\n'
-        f'• <b>Warranty Duration:</b> {WARRANTY_DAYS} Days\n'
+        f'• <tg-emoji emoji-id="5253742260054409879">🆕</tg-emoji> <b>New Gmail Price:</b> ${PRICE_NEW_GMAIL:.2f}\n'
+        f'• <tg-emoji emoji-id="5008025248314950702">🏛</tg-emoji> <b>Old Gmail Price:</b> ${PRICE_OLD_GMAIL:.2f}\n'
+        f'• <tg-emoji emoji-id="5262831879731555779">🛡</tg-emoji> <b>Warranty Duration:</b> {WARRANTY_DAYS} Days\n'
         f'• <b>Binance Pay ID:</b> <code>{BINANCE_PAY_ID}</code>\n'
         f'• <b>USDT Address:</b> <code>{USDT_BEP20_ADDRESS}</code>\n'
         f'• <b>UPI ID:</b> <code>{UPI_ID}</code>\n\n'
@@ -1077,10 +1106,10 @@ async def cb_change_val_start(call: CallbackQuery, state: FSMContext):
     action = call.data.split(":")[1]
     if action == "new_price":
         await state.set_state(AdminState.waiting_for_new_price)
-        await call.message.answer("Send new price in USD for <b>NEW Gmail</b> (e.g. <code>0.35</code>):", parse_mode=ParseMode.HTML)
+        await call.message.answer("Send new price in USD for <tg-emoji emoji-id=\"5253742260054409879\">🆕</tg-emoji> <b>NEW Gmail</b> (e.g. <code>0.35</code>):", parse_mode=ParseMode.HTML)
     elif action == "old_price":
         await state.set_state(AdminState.waiting_for_old_price)
-        await call.message.answer("Send new price in USD for <b>OLD Gmail</b> (e.g. <code>0.45</code>):", parse_mode=ParseMode.HTML)
+        await call.message.answer("Send new price in USD for <tg-emoji emoji-id=\"5008025248314950702\">🏛</tg-emoji> <b>OLD Gmail</b> (e.g. <code>0.45</code>):", parse_mode=ParseMode.HTML)
     elif action == "warranty":
         await state.set_state(AdminState.waiting_for_warranty_days)
         await call.message.answer("Send new warranty duration in <b>days</b> (e.g. <code>7</code>):", parse_mode=ParseMode.HTML)
@@ -1182,9 +1211,21 @@ async def process_admin_find_id(message: Message, state: FSMContext):
     else:
         text = f"🔍 <b>Results for:</b> <code>{query}</code>\n\n"
         if order_item:
-            text += f'<tg-emoji emoji-id="5445221832074483553">📦</tg-emoji> <b>Order #{order_item["id"]}</b>:\nUser: <code>{order_item["user_id"]}</code>\nCreds: <code>{order_item["credentials"]}</code>\nDate: {order_item["created_at"]}\n\n'
+            type_emoji = '<tg-emoji emoji-id="5253742260054409879">🆕</tg-emoji>' if order_item['account_type'] == "new" else '<tg-emoji emoji-id="5008025248314950702">🏛</tg-emoji>'
+            text += (
+                f'<tg-emoji emoji-id="5445221832074483553">📦</tg-emoji> <b>Order #{order_item["id"]}</b> ({type_emoji}):\n'
+                f'👤 User: <code>{order_item["user_id"]}</code>\n'
+                f'{format_account_credentials(order_item["credentials"])}\n'
+                f'📅 Date: {order_item["created_at"]}\n\n'
+            )
         if inv_item:
-            text += f'<tg-emoji emoji-id="5445221832074483553">🏷</tg-emoji> <b>Stock Item #{inv_item["id"]}</b>:\nType: {inv_item["account_type"]}\nStatus: {inv_item["status"]}\nCreds: <code>{inv_item["credentials"]}</code>'
+            type_emoji = '<tg-emoji emoji-id="5253742260054409879">🆕</tg-emoji>' if inv_item['account_type'] == "new" else '<tg-emoji emoji-id="5008025248314950702">🏛</tg-emoji>'
+            text += (
+                f'<tg-emoji emoji-id="5445221832074483553">🏷</tg-emoji> <b>Stock Item #{inv_item["id"]}</b>:\n'
+                f'📌 Type: {type_emoji} {inv_item["account_type"].upper()}\n'
+                f'Status: <code>{inv_item["status"]}</code>\n'
+                f'{format_account_credentials(inv_item["credentials"])}'
+            )
         await message.answer(text, parse_mode=ParseMode.HTML, reply_markup=get_admin_menu_keyboard())
     await state.clear()
 
@@ -1205,7 +1246,7 @@ async def admin_stats(message: Message):
         f'<tg-emoji emoji-id="5445221832074483553">📦</tg-emoji> <b>Total Sold Orders:</b> <code>{total_orders}</code>\n'
         f'<tg-emoji emoji-id="5417924076503062111">💰</tg-emoji> <b>Total Approved Deposits:</b> <b>${total_deposits:.2f}</b>\n'
         f'<tg-emoji emoji-id="5445353829304387411">⏳</tg-emoji> <b>Pending Deposit Requests:</b> <code>{pending_deposits}</code>\n'
-        f'<tg-emoji emoji-id="6217663806110175239">🟢</tg-emoji> <b>Available Stock:</b> New: {new_s} | Old: {old_s}'
+        f'<tg-emoji emoji-id="5253742260054409879">🆕</tg-emoji> <b>New Stock:</b> {new_s} | <tg-emoji emoji-id="5008025248314950702">🏛</tg-emoji> <b>Old Stock:</b> {old_s}'
     )
     await message.answer(text, parse_mode=ParseMode.HTML)
 
